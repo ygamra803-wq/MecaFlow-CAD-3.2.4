@@ -1,0 +1,17 @@
+{
+  // MecaFlow CAD - VS Code Debugging
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "chrome",
+      "request": "launch",
+      "name": "MecaFlow CAD (Vite + React)",
+      "url": "http://localhost:3000",
+      "webRoot": "${workspaceFolder}/src",
+      "preLaunchTask": "npm: dev",
+      "sourceMapPathOverrides": {
+        "webpack:///src/*": "${webRoot}/*"
+      }
+    }
+  ]
+}

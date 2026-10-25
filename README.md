@@ -1,11 +1,45 @@
-<div align="center">
+# Zero-Gap Laser CAD Pro ⚡ (MecaFlow-CAD V2)
 
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+## 📖 نظرة عامة (Overview)
+**Zero-Gap Laser CAD Pro** هو محرك هندسي متقدم يعتمد على الويب، صُمم خصيصاً لقطاع صناعة الأواني المنزلية (Kitchenware Manufacturing) وتطبيقات الليزر ذات الـ Tube Cutting. يوفر النظام حلاً للتشكيل والقطع وتطابق "التطابق الصفري" (Zero-Gap) للأنبوب الساند للمقبض والجدار المنحني للمقلاة، مما يضمن لحاماً ليزرياً دقيقاً.
 
-  <h1>Built with AI Studio</h2>
+تم تطوير التطبيق ليسمح بمعاينة الأشكال الهندسية وإجراء عمليات الطرح الهندسي البولياني (CSG Boolean Operations) في المتصفح مباشرة، باستخدام تقنيات `three-csg-ts` و `three-mesh-bvh`.
 
-  <p>The fastest path from prompt to production with Gemini.</p>
+---
 
-  <a href="https://aistudio.google.com/apps">Start building</a>
+## ✨ الميزات التقنية (Key Features)
+1. **الإسقاط الهندسي التام (Zero-Gap Projection)**: محاكاة شكل المقلاة وتوليد قاطع متوافق.
+2. **محاكاة مسار الليزر (Laser Simulation)**: معاينة متحركة لمسار القطع (Toolpath) لضمان الدقة قبل التصنيع.
+3. **مراجعة البيانات الفنية (Technical Review)**: مرحلة مخصصة لتدقيق القياسات النهائية والضبط الدقيق للزوايا.
+4. **تصدير STEP و G-code**: توليد سكريبت بايثون لـ `CadQuery` وأكواد G-code للماكينات.
+5. **تخزين محلي (Dexie)**: نظام متكامل لحفظ سجلات المشاريع محلياً.
 
-</div>
+---
+
+## 🛠️ دليل المطورين والتقنيات (Developer Guide & Stack)
+أُسس هذا المشروع على بيئة عمل حديثة ومستقرة:
+- **الواجهة**: React 19, Vite, TypeScript.
+- **التصميم**: Tailwind CSS, Lucide React.
+- **محرك 3D**: `three.js` (v0.184+), `@react-three/fiber`, `@react-three/csg`.
+- **محرك CSG**: `three-csg-ts` و `three-mesh-bvh`.
+- **قاعدة البيانات**: `Dexie.js` (IndexedDB).
+
+### ⚙️ تحديثات الأداء والدقة (Technical Improvements)
+لقد تم إدخال تحسينات حرجة على المحرك لضمان الجودة:
+- **[دليل التحسينات التقنية](/docs/TECH_IMPROVEMENTS.md)**: (Validation، إدارة الموارد والذاكرة، والتزامن).
+- **[توثيق الخوارزميات](/docs/ALGORITHMS.md)**: (شرح خوارزمية Adaptive Bezier Curve ودقة القياسات).
+
+### بنية المجلدات (Directory Structure)
+- `src/components/ThreeCanvas.tsx`: قلب التطبيق ومنطق الـ WebGL و CSG والمحاكاة.
+- `src/components/ZeroGapControlPanel.tsx`: لوحة التحكم وإدارة حالة المعالم الهندسية.
+- `src/lib/exportUtils.ts`: أداة توليد كود الـ Python/CadQuery.
+- `src/lib/storageBridge.ts`: واجهة الاتصال مع `Dexie` لحفظ المشاريع.
+
+---
+
+## 🚀 دليل الاستخدام السريع
+1. **ابدأ مشروعاً جديداً**: من لوحة التحكم (Dashboard).
+2. **اضبط المعاملات**: أو قم برفع ملف STL مخصص للأنبوب عبر لوحة التحكم.
+3. **تصفح مراحل العمل**: تنقل بين الخطوات (الأنبوب > المقلاة > المقبض > التقاطعات).
+4. **المراجعة الفنية**: استخدم المرحلة 6 لتدقيق مسار الليزر والضبط النهائي.
+5. **التصدير**: استخدم زر "تصدير الملفات" لتوليد ملفات STL أو كود CNC.

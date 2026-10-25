@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+node_modules/
+.git/
+build/
+dist/
+*.log
+*.tmp
+# إذا كان لديك ملفات CAD ضخمة لا تحتاج لتحليل كودها:
+*.step
+*.dwg

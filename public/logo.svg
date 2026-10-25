@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <!-- Modern Gradient containing Blue, Green, and Yellow -->
+    <linearGradient id="mecaGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3b82f6" />
+      <stop offset="50%" stop-color="#14b8a6" />
+      <stop offset="100%" stop-color="#fbbf24" />
+    </linearGradient>
+    
+    <!-- Accent glow gradient -->
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#14b8a6" stop-opacity="0.3" />
+      <stop offset="100%" stop-color="#000000" stop-opacity="0" />
+    </radialGradient>
+
+    <!-- Glowing laser spot gradient -->
+    <radialGradient id="laserGlow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ff007f" stop-opacity="1" />
+      <stop offset="30%" stop-color="#fbbf24" stop-opacity="0.8" />
+      <stop offset="100%" stop-color="#fbbf24" stop-opacity="0" />
+    </radialGradient>
+    
+    <!-- Sophisticated bevel and shadow effects -->
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="12" stdDeviation="15" flood-color="#000000" flood-opacity="0.6"/>
+    </filter>
+    <filter id="glowFilter" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="8" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <!-- Background Base (Squircle - super premium modern app shape) -->
+  <rect x="16" y="16" width="480" height="480" rx="128" fill="#09090b" stroke="#1f1f23" stroke-width="4" filter="url(#shadow)" />
+  
+  <!-- Subtle inner radial glow -->
+  <circle cx="256" cy="256" r="200" fill="url(#glow)" />
+
+  <!-- CAD Coordinate Grid Lines (Technical Aesthetics) -->
+  <g stroke="#27272a" stroke-width="1" stroke-dasharray="4,8" opacity="0.6">
+    <line x1="256" y1="60" x2="256" y2="452" />
+    <line x1="60" y1="256" x2="452" y2="256" />
+    <circle cx="256" cy="256" r="160" fill="none" />
+    <circle cx="256" cy="256" r="100" fill="none" />
+  </g>
+
+  <!-- Isometric Projection of intersecting shapes (The 0-Gap Concept) -->
+  <g transform="translate(256, 256)">
+    <!-- Rear half of the pipe - dashed to indicate technical transparency -->
+    <path d="M -80,-80 L -80,40 A 80,30 0 0 0 80,40 L 80,-80" fill="none" stroke="rgba(113, 113, 122, 0.4)" stroke-width="3" stroke-dasharray="6,6" />
+
+    <!-- The Pan curving surface representation -->
+    <path d="M -150,110 Q 0,40 150,110" fill="none" stroke="#27272a" stroke-width="8" stroke-linecap="round" opacity="0.8" />
+    <path d="M -150,125 Q 0,55 150,125" fill="none" stroke="#1f1f23" stroke-width="4" stroke-linecap="round" opacity="0.5" />
+
+    <!-- Intersecting Saddle Curve (The Zero-Gap seam) -->
+    <!-- This transitions from Blue to Green to Yellow -->
+    <path d="M -80,40 C -80,-10 -50,-30 0,-30 C 50,-30 80,-10 80,40 C 80,65 40,85 0,85 C -40,85 -80,65 -80,40 Z" 
+          fill="none" 
+          stroke="url(#mecaGradient)" 
+          stroke-width="12" 
+          stroke-linecap="round" 
+          stroke-linejoin="round"
+          filter="url(#glowFilter)" />
+
+    <!-- Dynamic Laser Beam Action (The Cutting focal dot) -->
+    <line x1="0" y1="-220" x2="0" y2="-30" stroke="#fbbf24" stroke-width="2.5" opacity="0.8" />
+    <line x1="0" y1="-220" x2="0" y2="-30" stroke="#3b82f6" stroke-width="1" opacity="0.9" />
+    
+    <!-- Focal Cutting point -->
+    <circle cx="0" cy="-30" r="15" fill="url(#laserGlow)" filter="url(#glowFilter)" />
+    <circle cx="0" cy="-30" r="4" fill="#ffffff" />
+
+    <!-- Decorative digital ring ticks around the cut -->
+    <g stroke="url(#mecaGradient)" stroke-width="2" opacity="0.5">
+      <line x1="-100" y1="40" x2="-115" y2="40" stroke-linecap="round" />
+      <line x1="100" y1="40" x2="115" y2="40" stroke-linecap="round" />
+      <line x1="0" y1="105" x2="0" y2="120" stroke-linecap="round" />
+    </g>
+  </g>
+
+  <!-- Subtle Elegant Version / Version Text at the bottom -->
+  <text x="256" y="435" fill="#71717a" font-family="monospace" font-size="14" font-weight="bold" letter-spacing="6" text-anchor="middle">ZERO-GAP SYSTEM</text>
+  <text x="256" y="455" fill="url(#mecaGradient)" font-family="sans-serif" font-size="10" font-weight="950" letter-spacing="4" text-anchor="middle">MECAFLOW V2</text>
+</svg>
