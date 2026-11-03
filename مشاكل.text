@@ -1,0 +1,1820 @@
+# **تقرير مراجعة شاملة لتطبيق MecaFlow-CAD V2.3**
+
+قمت بمراجعة كاملة لنظام **MecaFlow-CAD V2.3** (Zero-Gap Laser CAD Pro) والذي هو نظام متخصص في التصميم الهندسي لأنابيب المطبخ ومقاطع الليزر. فيما يلي **قائمة مفصلة بالمشاكل التقنية، مشاكل الكود، ومشاكل المنطق** التي اكتشفتها خلال المراجعة، مع الحلول المقترحة لكل منها.
+
+---
+
+---
+
+## 📋 **ملخص المشروع**
+- **الغرض**: نظام CAD متخصص لتصميم أنابيب المطبخ مع دقة Zero-Gap
+- **التقنيات**: React 19 + TypeScript + Three.js + CSG Operations + Dexie.js
+- **الميزات الرئيسية**: تصميم أنابيب، مقالع، مقابض، محاكاة الليزر، تصدير STEP/G-code
+- **الهيكلية**: 8 مراحل رئيسة (Wizard Steps) من Dashboard إلى Final Inspection
+
+---
+
+---
+
+# 🔴 **القائمة الكاملة للمشاكل والحلول**
+
+---
+
+## **📌 الفئة 1: مشاكل هيكلية وتنظيمية**
+
+### **1.1 مشكلة: عدم وجود نظام إدارة أخطاء مركزي موحد**
+**الوقع**:
+- هناك 3 أنظمة منفصلة لإدارة الأخطاء:
+  - `errorHandler.ts` (AppError class)
+  - `errorLogger.ts` (ErrorLogger class)
+  - `ErrorBoundary.tsx` (React Error Boundary)
+- لا يوجد تكامل بين هذه الأنظمة
+- بعض الأخطاء لا يتم تسجيلها أو معالجتها
+
+**الحل**:
+```typescript
+// إنشاء نظام مركزي موحد
+// 1. دمج جميع أنظمة الأخطاء في class واحد
+// 2. إضافة نظام تصنيفي للأخطاء (Error Codes)
+// 3. إضافة تسجيل تلقائي للاخطاء الحرجة
+// 4. إضافة نظام إشعارات للمستخدم
+```
+
+---
+
+### **1.2 مشكلة: عدم وجود توثيق فني كفء**
+**الوضع**:
+- ملفات مثل `DEVELOPMENT.md` و `API_DOCUMENTATION.md` غير مكتملة
+- لا يوجد توثيق لمكونات مثل `CSGProcessor` و `GeometryEngine`
+- لا يوجد diagram لتدفق البيانات بين المكونات
+
+**الحل**:
+```markdown
+# مطلوب:
+1. إنشاء ملف `ARCHITECTURE.md` يشرح:
+   - Diagram لتدفق البيانات
+   - علاقة المكونات ببعضها
+   - مسؤوليات كل module
+
+2. إضافة JSDoc لجميع الدوال الرئيسية
+3. إنشاء ملف `CONTRIBUTING.md` مع:
+   - كيفية إضافة ميزة جديدة
+   - كيفية اختبار الكود
+   - كيفية التعامل مع الأخطاء
+```
+
+---
+
+### **1.3 مشكلة: عدم وجود نظام بناء (Build System) متكامل**
+**الوضع**:
+- `vite.config.ts` و `tsconfig.json` أساسيين جدا
+- لا يوجد configuration للـ:
+  - Code splitting
+  - Tree shaking
+  - Optimization للـ 3D assets
+  - Source maps للـ production
+
+**الحل**:
+```typescript
+// vite.config.ts - تحسينات مطلوبة
+export default defineConfig({
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          three: ['three', 'three-stdlib'],
+          csg: ['three-bvh-csg', 'three-csg-ts'],
+          react: ['react', 'react-dom'],
+        }
+      }
+    },
+    // تمكين source maps
+    sourcemap: true,
+    // تحسينات للأداء
+    minify: 'esbuild',
+    target: 'es2020'
+  },
+  // تحسينات للـ dev server
+  server: {
+    headers: {
+      'Cross-Origin-Opener-Policy': 'same-origin',
+      'Cross-Origin-Embedder-Policy': 'require-corp'
+    }
+  }
+})
+```
+
+---
+
+## **📌 الفئة 2: مشاكل في إدارة الذاكرة والأداء**
+
+### **2.1 مشكلة: تسرب الذاكرة في CSG Operations**
+**الوضع**:
+- في `CSGProcessor.ts`: لا يتم التخلص من geometries بشكل صحيح
+- في `ThreeCanvas.tsx`: لا يوجد mechanism للتخلص من meshes القديمة
+- `disposeCSG()` لا تعمل بشكل كامل
+
+**الأدلة**:
+```typescript
+// في ThreeCanvas.tsx - السطور 80-120
+disposeCSG() {
+  // المشكل: لا يتم مسح جميع references
+  // المشكل: لا يتم استدعاء dispose() على جميع geometries
+  // المشكل: Brush objects لا يتم تخلص منها بشكل صحيح
+}
+```
+
+**الحل**:
+```typescript
+// CSGProcessor.ts - تحسين
+export class CSGProcessor {
+  private trackedBrushes: WeakSet<Brush> = new WeakSet();
+  private trackedGeometries: WeakSet<THREE.BufferGeometry> = new WeakSet();
+  private evaluator: Evaluator;
+
+  // إضافة mechanism للتخلص التلقائي
+  cleanupUnused() {
+    // استخدام WeakSet لتجنب memory leaks
+    const brushesToDispose = Array.from(this.trackedBrushes);
+    brushesToDispose.forEach(brush => {
+      if (brush.geometry) brush.geometry.dispose();
+      if (brush.material) {
+        if (Array.isArray(brush.material)) {
+          brush.material.forEach(m => m.dispose());
+        } else {
+          brush.material.dispose();
+        }
+      }
+    });
+    this.trackedBrushes = new WeakSet();
+  }
+}
+```
+
+---
+
+### **2.2 مشكلة: عدم وجود Debouncing/Throttling للمدخلات**
+**الوضع**:
+- في `ZeroGapControlPanel.tsx`: كل تغيير في input يؤدي إلى re-render كامل
+- في `ThreeCanvas.tsx`: كل تغيير في config يؤدي إلى rebuild كامل للـ geometry
+- لا يوجد debounce للمدخلات السريعة
+
+**الحل**:
+```typescript
+// إضافة debounce في ZeroGapControlPanel
+import { debounce } from 'lodash-es';
+
+const debouncedUpdate = debounce((config: ZeroGapState) => {
+  onUpdate(config);
+}, 150);
+
+// في inputs:
+<input
+  onChange={debounce((e) => {
+    const value = parseFloat(e.target.value);
+    updatePan('bottomDiameter', value);
+  }, 150)}
+/>
+```
+
+---
+
+### **2.3 مشكلة: عدم استخدام Web Workers بشكل فعال**
+**الوضع**:
+- `WorkerPool.ts` موجود لكن لا يستخدم بشكل فعال
+- عمليات CSG الثقيلة تنفذ في main thread
+- يؤدي إلى freezing للـ UI
+
+**الحل**:
+```typescript
+// نقل عمليات CSG إلى Web Workers
+// 1. إنشاء worker script منفصل
+// 2. استخدام Comlink أو message passing
+// 3. نقل operations مثل:
+//    - CSG.subtract
+//    - CSG.intersect
+//    - Geometry generation
+
+// مثال:
+const csgWorker = new Worker('./workers/csg.worker.ts');
+csgWorker.postMessage({
+  type: 'SUBTRACT',
+  target: targetData,
+  tool: toolData
+});
+```
+
+---
+
+## **📌 الفئة 3: مشاكل في الكود والمنطق**
+
+### **3.1 مشكلة: Type Safety غير كافية**
+**الوضع**:
+- استخدام `any` بشكل مفرط:
+  - `ThreeCanvas.tsx`: `config: any`
+  - `useProjectHistory.ts`: `geometry: any`
+  - `storageBridge.ts`: `geometryData: any`
+- عدم استخدام Generic Types
+- عدم وجود Validation للـ props
+
+**الأمثلة**:
+```typescript
+// في ThreeCanvas.tsx
+interface ThreeCanvasProps {
+  config: ZeroGapState; // ✅ جيد
+  gridVisible: boolean;
+  wizardStep: WizardStep;
+  onDimensionsChange?: (dimensions: {l: number, w: number, h: number} | null) => void;
+  finalPartFromHandle?: THREE.Object3D | null; // ❌ يجب أن يكون type أكثر دقة
+  onResultComputed?: (obj: THREE.Object3D) => void; // ❌ يجب أن يكون type أكثر دقة
+}
+```
+
+**الحل**:
+```typescript
+// 1. إنشاء types أكثر دقة
+type DimensionResult = {
+  length: number;
+  width: number;
+  height: number;
+  volume?: number;
+  surfaceArea?: number;
+};
+
+type GeometryResult = {
+  mesh: THREE.Mesh;
+  boundingBox: THREE.Box3;
+  dimensions: DimensionResult;
+};
+
+// 2. استخدام Zod Validation
+import { z } from 'zod';
+
+const GeometryResultSchema = z.object({
+  mesh: z.instanceof(THREE.Mesh),
+  boundingBox: z.instanceof(THREE.Box3),
+  dimensions: z.object({
+    length: z.number().positive(),
+    width: z.number().positive(),
+    height: z.number().positive()
+  })
+});
+```
+
+---
+
+### **3.2 مشكلة: عدم وجود Validation للـ Inputs**
+**الوضع**:
+- في `validators.ts`: Validation غير كاملة
+- لا يوجد validation لـ:
+  - Assembly config
+  - Handle config
+  - Wizard step transitions
+- لا يوجد validation في الوقت الفعلي (real-time)
+
+**الحل**:
+```typescript
+// validators.ts - توسيع
+export const FullConfigSchema = z.object({
+  pan: PanConfigSchema,
+  tube: TubeConfigSchema,
+  handle: z.object({
+    shape: z.enum(['rectangular', 'cylindrical', 'مخصص']),
+    width: z.number().gt(0),
+    height: z.number().gt(0),
+    depth: z.number().gt(0),
+    thickness: z.number().gt(0).lt(10), // سمك معقول
+    cornerRadius: z.number().gte(0),
+    angleX: z.number().min(-180).max(180),
+    angleY: z.number().min(-180).max(180),
+    offsetZ: z.number(),
+    insertionDepth: z.number().gte(0)
+  }),
+  assembly: z.object({
+    tiltAngle: z.number().min(-90).max(90),
+    handleAngleX: z.number().min(-180).max(180),
+    handleAngleY: z.number().min(-180).max(180),
+    handleOffset: z.number(),
+    insertionDistance: z.number().gte(0),
+    heightOffset: z.number(),
+    tiltAxis: z.enum(['X', 'Y'])
+  })
+});
+
+// إضافة validation في الوقت الفعلي
+export function validateConfig(config: unknown): ConfigValidationResult {
+  const result = FullConfigSchema.safeParse(config);
+  if (!result.success) {
+    return {
+      isValid: false,
+      errors: result.error.issues.map(issue => ({
+        path: issue.path.join('.'),
+        message: issue.message,
+        code: issue.code
+      }))
+    };
+  }
+  return { isValid: true, data: result.data };
+}
+```
+
+---
+
+### **3.3 مشكلة: عدم وجود Error Boundaries كافية**
+**الوضع**:
+- `ErrorBoundary.tsx` موجود لكن:
+  - لا يغطي جميع المكونات
+  - لا يوفر معلومات كافية عن الخطأ
+  - لا يوجد mechanism للـ recovery
+
+**الحل**:
+```typescript
+// تحسين ErrorBoundary
+class EnhancedErrorBoundary extends React.Component<{
+  children: React.ReactNode;
+  onError?: (error: Error, componentStack: string) => void;
+  fallback?: React.ReactNode;
+}, { hasError: boolean; error: Error | null }> {
+
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    // تسجيل الخطأ في النظام المركزي
+    ErrorHandler.handle(error, {
+      component: errorInfo.componentStack,
+      location: window.location.href
+    });
+
+    // إشعار النظام المركزي
+    if (this.props.onError) {
+      this.props.onError(error, errorInfo.componentStack);
+    }
+
+    // إعادة تحميل التطبيق في حالة أخطاء حرجة
+    if (error.message.includes('WebGL') ||
+        error.message.includes('out of memory')) {
+      window.location.reload();
+    }
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return this.props.fallback || (
+        <ErrorFallback
+          error={this.state.error}
+          onRetry={() => this.setState({ hasError: false, error: null })}
+        />
+      );
+    }
+    return this.props.children;
+  }
+}
+```
+
+---
+
+### **3.4 مشكلة: عدم وجود Mechanism للـ Undo/Redo كامل**
+**الوضع**:
+- `useProjectHistory.ts`: يوفر undo/redo لكن:
+  - لا يدعم nested operations
+  - لا يوجد limit للـ history size
+  - لا يوجد mechanism لـ merge operations
+  - لا يوجد compression للـ history
+
+**الحل**:
+```typescript
+// تحسين useProjectHistory
+export function useProjectHistory(projectId?: string) {
+  const [history, setHistory] = useState<GeometryState[]>([]);
+  const [currentIndex, setCurrentIndex] = useState<number>(-1);
+  const MAX_HISTORY_SIZE = 50; // حد أقصى للـ history
+
+  const updateGeometry = useCallback((newGeometry: GeometryState) => {
+    setHistory(prev => {
+      const newHistory = prev.slice(0, currentIndex + 1);
+
+      // إذا كان التغير صغيرا، دمج مع آخر operation
+      if (newHistory.length > 0) {
+        const last = newHistory[newHistory.length - 1];
+        if (isSimilarGeometry(last, newGeometry)) {
+          return newHistory; // تجاهل التغير الصغير
+        }
+      }
+
+      // إضافة التغير الجديد
+      const updated = [...newHistory, newGeometry];
+
+      // تقليل حجم history إذا تجاوز الحد
+      if (updated.length > MAX_HISTORY_SIZE) {
+        return updated.slice(-MAX_HISTORY_SIZE);
+      }
+
+      return updated;
+    });
+    setCurrentIndex(prev => prev + 1);
+  }, [currentIndex]);
+
+  // دالة لمقارنة geometries
+  const isSimilarGeometry = (a: GeometryState, b: GeometryState): boolean => {
+    // مقارنة بسيطة للـ config
+    return JSON.stringify(a) === JSON.stringify(b);
+  };
+}
+```
+
+---
+
+## **📌 الفئة 4: مشاكل في تصدير الملفات**
+
+### **4.1 مشكلة: STEP Export غير كامل**
+**الوضع**:
+- `stepExporter.ts`: يولد STEP files لكن:
+  - لا يدعم جميع أنواع geometries
+  - لا يوجد validation للـ output
+  - لا يوجد support لـ metadata إضافية
+  - لا يوجد testing للـ export
+
+**الحل**:
+```typescript
+// تحسين stepExporter
+export const exportToSTEP = (mesh: THREE.Object3D): STEPFile => {
+  // 1. Validation
+  if (!mesh) {
+    throw new AppError(
+      'INVALID_MESH',
+      'Cannot export null/undefined mesh to STEP',
+      'error'
+    );
+  }
+
+  // 2. جمع جميع meshes
+  const meshes: THREE.Mesh[] = [];
+  mesh.traverse((child) => {
+    if (child instanceof THREE.Mesh && child.geometry) {
+      meshes.push(child);
+    }
+  });
+
+  if (meshes.length === 0) {
+    throw new AppError(
+      'NO_GEOMETRY',
+      'No geometry found in the mesh',
+      'error'
+    );
+  }
+
+  // 3. إضافة metadata
+  const metadata = {
+    exporter: 'MecaFlow-CAD v2.3',
+    timestamp: new Date().toISOString(),
+    version: 'STEP AP214',
+    units: 'MILLI_METRE'
+  };
+
+  // 4. توليد STEP content
+  const stepContent = generateSTEPContent(meshes, metadata);
+
+  // 5. Validation للـ output
+  validateSTEPContent(stepContent);
+
+  return stepContent;
+};
+```
+
+---
+
+### **4.2 مشكلة: عدم وجود نظام تصدير موحد**
+**الوضع**:
+- هناك عدة طرق للتصدير:
+  - `exportUtils.ts` (CadQuery)
+  - `ExportManager.ts` (STL/STEP)
+  - `gcodeGenerator.ts` (G-code)
+  - `storageBridge.ts` (Native export)
+- لا يوجد interface موحد
+
+**الحل**:
+```typescript
+// إنشاء ExportService موحد
+interface ExportOptions {
+  format: 'stl' | 'step' | 'stp' | 'gcode' | 'nc' | 'py';
+  quality?: number;
+  binary?: boolean;
+  includeMetadata?: boolean;
+}
+
+interface ExportResult {
+  success: boolean;
+  content: string | Uint8Array | null;
+  fileName: string;
+  fileSize: number;
+  error?: string;
+}
+
+export class ExportService {
+  static async export(
+    mesh: THREE.Object3D,
+    options: ExportOptions
+  ): Promise<ExportResult> {
+    try {
+      switch (options.format) {
+        case 'stl':
+          return this.exportSTL(mesh, options);
+        case 'step':
+        case 'stp':
+          return this.exportSTEP(mesh, options);
+        case 'gcode':
+        case 'nc':
+          return this.exportGCode(mesh, options);
+        case 'py':
+          return this.exportPython(mesh, options);
+        default:
+          throw new AppError(
+            'UNSUPPORTED_FORMAT',
+            `Format ${options.format} is not supported`,
+            'error'
+          );
+      }
+    } catch (error) {
+      return {
+        success: false,
+        content: null,
+        fileName: '',
+        fileSize: 0,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      };
+    }
+  }
+}
+```
+
+---
+
+## **📌 الفئة 5: مشاكل في الاختبارات**
+
+### **5.1 مشكلة: عدم وجود اختبارات كافية**
+**الوضع**:
+- `comprehensive.test.ts`: اختبارات بسيطة جدا
+- لا يوجد اختبارات لـ:
+  - CSG operations
+  - Geometry generation
+  - Export functionality
+  - Performance
+  - Error handling
+
+**الحل**:
+```typescript
+// إضافة اختبارات شاملة
+
+// 1. اختبارات CSG
+describe('CSGProcessor', () => {
+  it('should correctly subtract two meshes', () => {
+    const cube1 = new THREE.Mesh(new THREE.BoxGeometry(10, 10, 10));
+    const cube2 = new THREE.Mesh(new THREE.BoxGeometry(5, 5, 5));
+    cube2.position.set(2.5, 2.5, 2.5);
+
+    const processor = new CSGProcessor();
+    const brush1 = processor.createBrush(cube1, cube1.geometry);
+    const brush2 = processor.createBrush(cube2, cube2.geometry);
+
+    const result = processor.subtract(brush1, brush2);
+
+    expect(result).toBeDefined();
+    // إضافة validation للـ result
+  });
+
+  it('should not leak memory', () => {
+    const processor = new CSGProcessor();
+    const initialCount = processor['trackedGeometries'].size;
+
+    // إنشاء العديد من geometries
+    for (let i = 0; i < 100; i++) {
+      const geom = new THREE.BoxGeometry(1, 1, 1);
+      processor.createBrush(new THREE.Mesh(geom), geom);
+    }
+
+    // التخلص من جميع
+    processor.disposeAll();
+
+    // التحقق من عدم وجود تسرب
+    expect(processor['trackedGeometries'].size).toBe(0);
+  });
+});
+
+// 2. اختبارات Export
+describe('ExportService', () => {
+  it('should export valid STL', async () => {
+    const cube = new THREE.Mesh(new THREE.BoxGeometry(10, 10, 10));
+    const result = await ExportService.export(cube, { format: 'stl' });
+
+    expect(result.success).toBe(true);
+    expect(result.content).not.toBeNull();
+    expect(result.fileSize).toBeGreaterThan(0);
+  });
+
+  it('should export valid STEP', async () => {
+    const cube = new THREE.Mesh(new THREE.BoxGeometry(10, 10, 10));
+    const result = await ExportService.export(cube, { format: 'step' });
+
+    expect(result.success).toBe(true);
+    expect(String(result.content).includes('ISO-10303-21')).toBe(true);
+  });
+});
+
+// 3. اختبارات Performance
+describe('Performance', () => {
+  it('should handle 1000 geometries without crashing', () => {
+    const geometries: THREE.BufferGeometry[] = [];
+
+    for (let i = 0; i < 1000; i++) {
+      geometries.push(new THREE.BoxGeometry(1, 1, 1));
+    }
+
+    // يجب أن لا يحدث crash
+    expect(() => {
+      geometries.forEach(g => g.dispose());
+    }).not.toThrow();
+  });
+});
+```
+
+---
+
+### **5.2 مشكلة: عدم وجود Mocking للـ Three.js**
+**الوضع**:
+- اختبارات `comprehensive.test.ts` تستخدم mocks بسيطة
+- لا يوجد mocking للـ Three.js objects
+- يصعب اختبار المكونات التي تعتمد على Three.js
+
+**الحل**:
+```typescript
+// إنشاء mocks لـ Three.js
+// 1. استخدام jest.mock
+// 2. إنشاء mock implementations
+
+// مثال:
+jest.mock('three', () => {
+  const original = jest.requireActual('three');
+
+  return {
+    ...original,
+    Mesh: jest.fn().mockImplementation(() => ({
+      geometry: null,
+      material: null,
+      position: { set: jest.fn(), x: 0, y: 0, z: 0 },
+      rotation: { set: jest.fn(), x: 0, y: 0, z: 0 },
+      updateMatrixWorld: jest.fn(),
+      traverse: jest.fn(),
+      dispose: jest.fn()
+    })),
+    BoxGeometry: jest.fn().mockImplementation(() => ({
+      dispose: jest.fn(),
+      attributes: {
+        position: {
+          count: 0,
+          getX: jest.fn(),
+          getY: jest.fn(),
+          getZ: jest.fn()
+        }
+      }
+    }))
+  };
+});
+```
+
+---
+
+## **📌 الفئة 6: مشاكل في patch_render.py**
+
+### **6.1 مشكلة: ملف Python غير فعال**
+**الوضع**:
+- `patch_render.py`: يحاول تعديل ملف `ThreeCanvas.tsx`
+- لكن:
+  - لا يعمل لأن الملف غير موجود في نفس المسار
+  - يستخدم regex غير دقيق
+  - لا يوجد validation للـ input
+  - لا يوجد error handling
+
+**الحل**:
+```python
+# تحسين patch_render.py
+import re
+import sys
+from pathlib import Path
+
+def patch_three_canvas():
+    try:
+        # التحقق من وجود الملف
+        canvas_path = Path('src/components/ThreeCanvas.tsx')
+        if not canvas_path.exists():
+            print(f"❌ Error: File not found: {canvas_path}")
+            return False
+
+        # قراءة المحتوى
+        with open(canvas_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        # التحقق من وجود pattern
+        pattern = r"// \u2500\u2500 5\. Render: Preview or Boolean.*?// \u2500\u2500 TRUE ABSOLUTE CENTER"
+        if not re.search(pattern, content, re.DOTALL):
+            print("❌ Error: Pattern not found in file")
+            return False
+
+        # تطبيق التعديل
+        replacement = """// الجديد Render logic"""
+        new_content = re.sub(pattern, replacement, content, flags=re.DOTALL)
+
+        # الكتابة
+        with open(canvas_path, 'w', encoding='utf-8') as f:
+            f.write(new_content)
+
+        print("✅ Successfully patched ThreeCanvas.tsx")
+        return True
+
+    except Exception as e:
+        print(f"❌ Error patching file: {e}")
+        return False
+
+if __name__ == "__main__":
+    success = patch_three_canvas()
+    sys.exit(0 if success else 1)
+```
+
+---
+
+### **6.2 مشكلة: عدم وجود نظام Patch Management**
+**الوضع**:
+- لا يوجد نظام لإدارة patches
+- لا يوجد way لـ revert patches
+- لا يوجد tracking للـ changes
+
+**الحل**:
+```python
+# إنشاء نظام Patch Management
+import json
+from pathlib import Path
+from typing import Dict, List, Optional
+
+class PatchManager:
+    def __init__(self, patches_dir: str = 'patches'):
+        self.patches_dir = Path(patches_dir)
+        self.patches_dir.mkdir(exist_ok=True)
+        self.applied_patches: Dict[str, bool] = {}
+
+    def load_patches(self) -> List[Dict]:
+        """تحميل جميع patches من الملفات"""
+        patches = []
+        for patch_file in self.patches_dir.glob('*.json'):
+            with open(patch_file, 'r', encoding='utf-8') as f:
+                patches.append(json.load(f))
+        return sorted(patches, key=lambda x: x.get('priority', 0))
+
+    def apply_patch(self, patch: Dict) -> bool:
+        """تطبيق patch واحد"""
+        try:
+            file_path = Path(patch['file'])
+            if not file_path.exists():
+                return False
+
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            # تطبيق جميع replacements
+            for replacement in patch.get('replacements', []):
+                content = content.replace(
+                    replacement['old'],
+                    replacement['new']
+                )
+
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(content)
+
+            self.applied_patches[patch['id']] = True
+            return True
+
+        except Exception as e:
+            print(f"Error applying patch {patch['id']}: {e}")
+            return False
+
+    def revert_patch(self, patch: Dict) -> bool:
+        """تراجع عن patch"""
+        # logic لـ revert
+        pass
+
+    def apply_all(self) -> Dict[str, bool]:
+        """تطبيق جميع patches"""
+        patches = self.load_patches()
+        results = {}
+
+        for patch in patches:
+            results[patch['id']] = self.apply_patch(patch)
+
+        return results
+```
+
+---
+
+## **📌 الفئة 7: مشاكل في الواجهة والمستخدم**
+
+### **7.1 مشكلة: عدم وجود Feedback للـ User**
+**الوضع**:
+- عند حدوث خطأ، لا يوجد إشعار واضح للمستخدم
+- لا يوجد loading indicators لبعض العمليات
+- لا يوجد progress bars للـ exports الثقيلة
+
+**الحل**:
+```typescript
+// 1. إنشاء نظام إشعارات
+export class NotificationService {
+  static success(message: string, duration: number = 3000) {
+    // إظهار إشعار نجاح
+    const notification = document.createElement('div');
+    notification.className = 'notification success';
+    notification.textContent = message;
+    document.body.appendChild(notification);
+
+    setTimeout(() => {
+      notification.remove();
+    }, duration);
+  }
+
+  static error(message: string, duration: number = 5000) {
+    // إظهار إشعار خطأ
+    const notification = document.createElement('div');
+    notification.className = 'notification error';
+    notification.textContent = message;
+    document.body.appendChild(notification);
+
+    setTimeout(() => {
+      notification.remove();
+    }, duration);
+  }
+
+  static warning(message: string, duration: number = 4000) {
+    // إظهار إشعار تحذير
+  }
+
+  static info(message: string, duration: number = 3000) {
+    // إظهار إشعار معلومات
+  }
+}
+
+// 2. استخدام في الكود
+try {
+  await exportSTL();
+  NotificationService.success('تم تصدير الملف بنجاح');
+} catch (error) {
+  NotificationService.error(`فشل التصدير: ${error.message}`);
+}
+```
+
+---
+
+### **7.2 مشكلة: عدم وجود Hotkeys**
+**الوضع**:
+- لا يوجد shortcuts للكيboard
+- يجب استخدام الفأرة لكل شيء
+
+**الحل**:
+```typescript
+// إضافة نظام Hotkeys
+export class HotkeyService {
+  private static handlers: Map<string, () => void> = new Map();
+
+  static registerHotkey(key: string, callback: () => void) {
+    this.handlers.set(key, callback);
+  }
+
+  static unregisterHotkey(key: string) {
+    this.handlers.delete(key);
+  }
+
+  static setupGlobalListener() {
+    document.addEventListener('keydown', (e) => {
+      // تجاهل إذا كان هناك input نشط
+      if (e.target instanceof HTMLInputElement ||
+          e.target instanceof HTMLTextAreaElement) {
+        return;
+      }
+
+      const key = this.getKeyCombination(e);
+      const handler = this.handlers.get(key);
+
+      if (handler) {
+        e.preventDefault();
+        handler();
+      }
+    });
+  }
+
+  private static getKeyCombination(e: KeyboardEvent): string {
+    const parts: string[] = [];
+
+    if (e.ctrlKey) parts.push('Ctrl');
+    if (e.shiftKey) parts.push('Shift');
+    if (e.altKey) parts.push('Alt');
+    if (e.metaKey) parts.push('Meta');
+
+    parts.push(e.key);
+
+    return parts.join('+');
+  }
+}
+
+// الاستخدام:
+HotkeyService.registerHotkey('Ctrl+Z', () => {
+  undo();
+});
+
+HotkeyService.registerHotkey('Ctrl+Y', () => {
+  redo();
+});
+
+HotkeyService.registerHotkey('Ctrl+S', () => {
+  saveProject();
+});
+
+HotkeyService.setupGlobalListener();
+```
+
+---
+
+### **7.3 مشكلة: عدم وجود Localization كامل**
+**الوضع**:
+- بعض النصوص بالعربية، بعض بالإنجليزية
+- لا يوجد نظام localization مركزي
+- يصعب صيانة النصوص
+
+**الحل**:
+```typescript
+// 1. إنشاء نظام Localization
+interface Translations {
+  [key: string]: {
+    [lang: string]: string;
+  };
+}
+
+const translations: Translations = {
+  'dashboard.title': {
+    en: 'Dashboard',
+    ar: 'اللوحة الرئيسية'
+  },
+  'save.success': {
+    en: 'Project saved successfully',
+    ar: 'تم حفظ المشروع بنجاح'
+  },
+  'error.validation': {
+    en: 'Validation error',
+    ar: 'خطأ في التحقق'
+  }
+};
+
+class LocalizationService {
+  private static currentLang: string = 'ar'; // الافتراضي عربية
+
+  static setLanguage(lang: string) {
+    this.currentLang = lang;
+    document.documentElement.lang = lang;
+    document.documentElement.dir = lang === 'ar' ? 'rtl' : 'ltr';
+  }
+
+  static getCurrentLanguage(): string {
+    return this.currentLang;
+  }
+
+  static t(key: string, params?: Record<string, string>): string {
+    const translation = translations[key]?.[this.currentLang];
+
+    if (!translation) {
+      console.warn(`Translation not found: ${key}`);
+      return key;
+    }
+
+    // استبدال المتغيرات
+    if (params) {
+      return Object.entries(params).reduce(
+        (str, [param, value]) => str.replace(`{${param}}`, value),
+        translation
+      );
+    }
+
+    return translation;
+  }
+}
+
+// الاستخدام:
+<button onClick={saveProject}>
+  {LocalizationService.t('save.button')}
+</button>
+```
+
+---
+
+## **📌 الفئة 8: مشاكل في الأمان**
+
+### **8.1 مشكلة: عدم وجود Input Sanitization**
+**الوضع**:
+- لا يوجد sanitization للـ user inputs
+- ممكن حدوث XSS attacks
+- ممكن حدوث injection attacks
+
+**الحل**:
+```typescript
+// 1. إضافة sanitization للـ inputs
+export class InputSanitizer {
+  static sanitizeString(input: string): string {
+    // إزالة HTML tags
+    return input.replace(/<[^>]*>/g, '');
+  }
+
+  static sanitizeNumber(input: string): number | null {
+    const num = parseFloat(input);
+    if (isNaN(num)) return null;
+
+    // التحقق من أن الرقم في نطاق معقول
+    if (Math.abs(num) > 1e10) return null;
+
+    return num;
+  }
+
+  static sanitizeObject(obj: unknown): Record<string, unknown> {
+    if (typeof obj !== 'object' || obj === null) {
+      return {};
+    }
+
+    const result: Record<string, unknown> = {};
+
+    for (const [key, value] of Object.entries(obj)) {
+      if (typeof value === 'string') {
+        result[key] = this.sanitizeString(value);
+      } else if (typeof value === 'number') {
+        result[key] = this.sanitizeNumber(value.toString());
+      } else if (typeof value === 'object' && value !== null) {
+        result[key] = this.sanitizeObject(value);
+      } else {
+        result[key] = value;
+      }
+    }
+
+    return result;
+  }
+}
+
+// الاستخدام:
+const userInput = '<script>alert("XSS")</script>';
+const safeInput = InputSanitizer.sanitizeString(userInput);
+// safeInput = "alert("XSS")"
+```
+
+---
+
+### **8.2 مشكلة: عدم وجود Rate Limiting**
+**الوضع**:
+- لا يوجد rate limiting للـ API calls
+- ممكن حدوث DDoS attacks
+- ممكن استنزاف موارد الخادم
+
+**الحل**:
+```typescript
+// إضافة Rate Limiter
+class RateLimiter {
+  private requests: Map<string, { count: number; lastRequest: number }> = new Map();
+  private maxRequests: number;
+  private windowMs: number;
+
+  constructor(maxRequests: number = 10, windowMs: number = 1000) {
+    this.maxRequests = maxRequests;
+    this.windowMs = windowMs;
+  }
+
+  check(ip: string): boolean {
+    const now = Date.now();
+    const record = this.requests.get(ip);
+
+    if (!record) {
+      this.requests.set(ip, { count: 1, lastRequest: now });
+      return true;
+    }
+
+    // إذا انقضت الفترة، إعادة التعديل
+    if (now - record.lastRequest > this.windowMs) {
+      this.requests.set(ip, { count: 1, lastRequest: now });
+      return true;
+    }
+
+    // إذا تجاوز الحد
+    if (record.count >= this.maxRequests) {
+      return false;
+    }
+
+    // زيادة العداد
+    this.requests.set(ip, { count: record.count + 1, lastRequest: now });
+    return true;
+  }
+
+  reset(ip: string) {
+    this.requests.delete(ip);
+  }
+}
+
+// الاستخدام:
+const rateLimiter = new RateLimiter(10, 1000); // 10 requests per second
+
+async function exportToServer(data: unknown) {
+  const ip = 'user-ip'; // الحصول على IP من request
+
+  if (!rateLimiter.check(ip)) {
+    throw new AppError(
+      'RATE_LIMITED',
+      'Too many requests. Please try again later.',
+      'error'
+    );
+  }
+
+  // الاستمرار مع request
+}
+```
+
+---
+
+## **📌 الفئة 9: مشاكل في الصيانة**
+
+### **9.1 مشكلة: عدم وجود Logging مركزي**
+**الوضع**:
+- استخدام `console.log` و `console.error` بشكل عشوائي
+- لا يوجد نظام logging مركزي
+- يصعب تتبع الأخطاء في production
+
+**الحل**:
+```typescript
+// إنشاء نظام Logging مركزي
+enum LogLevel {
+  DEBUG = 'debug',
+  INFO = 'info',
+  WARN = 'warn',
+  ERROR = 'error',
+  CRITICAL = 'critical'
+}
+
+interface LogEntry {
+  level: LogLevel;
+  message: string;
+  context?: Record<string, unknown>;
+  timestamp: string;
+  stack?: string;
+}
+
+class Logger {
+  private static logs: LogEntry[] = [];
+  private static maxLogs = 1000;
+  private static listeners: Array<(entry: LogEntry) => void> = [];
+
+  static log(
+    level: LogLevel,
+    message: string,
+    context?: Record<string, unknown>,
+    stack?: string
+  ) {
+    const entry: LogEntry = {
+      level,
+      message,
+      context,
+      timestamp: new Date().toISOString(),
+      stack
+    };
+
+    this.logs.push(entry);
+
+    // الحفاظ على حجم logs
+    if (this.logs.length > this.maxLogs) {
+      this.logs.shift();
+    }
+
+    // طباعة إلى console
+    const method = level === LogLevel.ERROR || level === LogLevel.CRITICAL
+      ? console.error
+      : level === LogLevel.WARN
+        ? console.warn
+        : console.log;
+
+    method(`[${level.toUpperCase()}]`, message, context);
+
+    // إشعار listeners
+    this.listeners.forEach(listener => listener(entry));
+
+    // إرسال إلى server في حالة errors
+    if (level === LogLevel.ERROR || level === LogLevel.CRITICAL) {
+      this.sendToServer(entry);
+    }
+  }
+
+  static debug(message: string, context?: Record<string, unknown>) {
+    this.log(LogLevel.DEBUG, message, context);
+  }
+
+  static info(message: string, context?: Record<string, unknown>) {
+    this.log(LogLevel.INFO, message, context);
+  }
+
+  static warn(message: string, context?: Record<string, unknown>) {
+    this.log(LogLevel.WARN, message, context);
+  }
+
+  static error(message: string, context?: Record<string, unknown>, stack?: string) {
+    this.log(LogLevel.ERROR, message, context, stack);
+  }
+
+  static critical(message: string, context?: Record<string, unknown>, stack?: string) {
+    this.log(LogLevel.CRITICAL, message, context, stack);
+  }
+
+  static subscribe(listener: (entry: LogEntry) => void) {
+    this.listeners.push(listener);
+  }
+
+  static getLogs(): LogEntry[] {
+    return [...this.logs];
+  }
+
+  static clearLogs() {
+    this.logs = [];
+  }
+
+  private static async sendToServer(entry: LogEntry) {
+    try {
+      await fetch('/api/logs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(entry)
+      });
+    } catch (e) {
+      console.error('Failed to send logs to server:', e);
+    }
+  }
+}
+
+// الاستخدام:
+Logger.info('Application started', { version: '2.3.0' });
+Logger.error('Failed to load project', { projectId: '123' }, error.stack);
+```
+
+---
+
+### **9.2 مشكلة: عدم وجود Health Checks**
+**الوضع**:
+- لا يوجد health checks للـ application
+- لا يوجد monitoring للـ performance
+- يصعب اكتشاف المشاكل في production
+
+**الحل**:
+```typescript
+// إضافة Health Check System
+class HealthMonitor {
+  private static checks: Map<string, () => Promise<HealthStatus>> = new Map();
+  private static interval: NodeJS.Timeout | null = null;
+
+  static registerCheck(name: string, check: () => Promise<HealthStatus>) {
+    this.checks.set(name, check);
+  }
+
+  static startMonitoring(intervalMs: number = 60000) {
+    if (this.interval) {
+      clearInterval(this.interval);
+    }
+
+    this.interval = setInterval(async () => {
+      const results: Record<string, HealthStatus> = {};
+
+      for (const [name, check] of this.checks) {
+        try {
+          results[name] = await check();
+        } catch (error) {
+          results[name] = {
+            healthy: false,
+            error: error instanceof Error ? error.message : 'Unknown error'
+          };
+        }
+      }
+
+      // إرسال النتائج إلى server
+      await this.reportHealth(results);
+    }, intervalMs);
+  }
+
+  static stopMonitoring() {
+    if (this.interval) {
+      clearInterval(this.interval);
+      this.interval = null;
+    }
+  }
+
+  private static async reportHealth(status: Record<string, HealthStatus>) {
+    try {
+      await fetch('/api/health', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          timestamp: new Date().toISOString(),
+          status
+        })
+      });
+    } catch (e) {
+      console.error('Failed to report health:', e);
+    }
+  }
+}
+
+interface HealthStatus {
+  healthy: boolean;
+  error?: string;
+  details?: Record<string, unknown>;
+}
+
+// تسجيل checks
+HealthMonitor.registerCheck('memory', async () => {
+  if (typeof performance !== 'undefined' && (performance as any).memory) {
+    const memory = (performance as any).memory;
+    return {
+      healthy: memory.usedJSHeapSize < memory.jsHeapSizeLimit * 0.9,
+      details: {
+        used: memory.usedJSHeapSize,
+        limit: memory.jsHeapSizeLimit
+      }
+    };
+  }
+  return { healthy: true };
+});
+
+HealthMonitor.registerCheck('webgl', async () => {
+  try {
+    const canvas = document.createElement('canvas');
+    const gl = canvas.getContext('webgl');
+    return { healthy: !!gl };
+  } catch (e) {
+    return { healthy: false, error: 'WebGL not available' };
+  }
+});
+
+// البدء في monitoring
+HealthMonitor.startMonitoring();
+```
+
+---
+
+### **9.3 مشكلة: عدم وجود Documentation Generation**
+**الوضع**:
+- لا يوجد system لتوليد التوثيق تلقائيا
+- يصعب الحفاظ على توثيق محدث
+
+**الحل**:
+```typescript
+// 1. إضافة TypeDoc
+// package.json
+{
+  "scripts": {
+    "docs": "typedoc --out docs src"
+  },
+  "devDependencies": {
+    "typedoc": "^0.25.0",
+    "typedoc-plugin-markdown": "^3.15.0"
+  }
+}
+
+// 2. إضافة JSDoc لكل دالة
+/**
+ * تنشيء هندسة أنبوب
+ * @param config - إعدادات الأنبوب
+ * @param config.width - عرض الأنبوب (mm)
+ * @param config.height - ارتفاع الأنبوب (mm)
+ * @param config.thickness - سمك الأنبوب (mm)
+ * @param config.length - طول الأنبوب (mm)
+ * @returns هندسة الأنبوب
+ * @throws {ValidationError} إذا كانت القيم غير صالحة
+ */
+function createTubeGeometry(config: TubeConfig): THREE.BufferGeometry {
+  // ...
+}
+
+// 3. إضافة examples في JSDoc
+/**
+ * مثال على استخدام:
+ * ```typescript
+ * const tube = createTubeGeometry({
+ *   width: 38,
+ *   height: 25,
+ *   thickness: 1.2,
+ *   length: 120
+ * });
+ * ```
+ */
+```
+
+---
+
+## **📌 الفئة 10: مشاكل في التوسع**
+
+### **10.1 مشكلة: عدم وجود Plugin System**
+**الوضع**:
+- النظام مغلق، لا يمكن إضافة plugins
+- لا يوجد way لـ extend functionality
+
+**الحل**:
+```typescript
+// إنشاء Plugin System
+interface MecaFlowPlugin {
+  id: string;
+  name: string;
+  version: string;
+  description?: string;
+  author?: string;
+
+  // دوال lifecycle
+  initialize?: (app: MecaFlowApp) => void | Promise<void>;
+  destroy?: () => void | Promise<void>;
+
+  // إضافة عناصر واجهة
+  addToolbarButton?: (toolbar: Toolbar) => void;
+  addPanel?: (sidebar: Sidebar) => void;
+  addMenuItem?: (menu: Menu) => void;
+
+  // إضافة وظائف جديدة
+  addGeometryType?: (type: string, generator: GeometryGenerator) => void;
+  addExportFormat?: (format: string, exporter: Exporter) => void;
+  addValidationRule?: (rule: ValidationRule) => void;
+}
+
+class PluginManager {
+  private plugins: Map<string, MecaFlowPlugin> = new Map();
+  private app: MecaFlowApp;
+
+  constructor(app: MecaFlowApp) {
+    this.app = app;
+  }
+
+  async loadPlugin(plugin: MecaFlowPlugin): Promise<boolean> {
+    try {
+      if (this.plugins.has(plugin.id)) {
+        console.warn(`Plugin ${plugin.id} already loaded`);
+        return false;
+      }
+
+      // استدعاء initialize
+      if (plugin.initialize) {
+        await plugin.initialize(this.app);
+      }
+
+      this.plugins.set(plugin.id, plugin);
+      console.log(`✅ Plugin ${plugin.id} loaded successfully`);
+      return true;
+    } catch (error) {
+      console.error(`❌ Failed to load plugin ${plugin.id}:`, error);
+      return false;
+    }
+  }
+
+  async unloadPlugin(pluginId: string): Promise<boolean> {
+    const plugin = this.plugins.get(pluginId);
+    if (!plugin) {
+      return false;
+    }
+
+    try {
+      if (plugin.destroy) {
+        await plugin.destroy();
+      }
+
+      this.plugins.delete(pluginId);
+      console.log(`✅ Plugin ${pluginId} unloaded successfully`);
+      return true;
+    } catch (error) {
+      console.error(`❌ Failed to unload plugin ${pluginId}:`, error);
+      return false;
+    }
+  }
+
+  getPlugin<T extends MecaFlowPlugin>(pluginId: string): T | undefined {
+    return this.plugins.get(pluginId) as T | undefined;
+  }
+
+  getAllPlugins(): MecaFlowPlugin[] {
+    return Array.from(this.plugins.values());
+  }
+}
+
+// الاستخدام:
+const pluginManager = new PluginManager(app);
+
+// تحميل plugin
+await pluginManager.loadPlugin({
+  id: 'advanced-export',
+  name: 'Advanced Export',
+  version: '1.0.0',
+  description: 'إضافة تنسيقات تصدير جديدة',
+  addExportFormat: (format, exporter) => {
+    ExportService.registerFormat(format, exporter);
+  }
+});
+```
+
+---
+
+### **10.2 مشكلة: عدم وجود Theme System**
+**الوضع**:
+- النظام يستخدم Tailwind CSS بشكل مباشر
+- لا يوجد way لتغيير theme
+- يصعب دعم dark/light mode
+
+**الحل**:
+```typescript
+// إنشاء Theme System
+interface Theme {
+  id: string;
+  name: string;
+  colors: {
+    primary: string;
+    secondary: string;
+    background: string;
+    surface: string;
+    text: string;
+    textSecondary: string;
+    border: string;
+    success: string;
+    warning: string;
+    error: string;
+    info: string;
+  };
+  fonts: {
+    primary: string;
+    secondary: string;
+    mono: string;
+  };
+  direction: 'ltr' | 'rtl';
+}
+
+const themes: Theme[] = [
+  {
+    id: 'light',
+    name: 'Light',
+    colors: {
+      primary: '#3b82f6',
+      secondary: '#6366f1',
+      background: '#ffffff',
+      surface: '#f8fafc',
+      text: '#0f172a',
+      textSecondary: '#64748b',
+      border: '#e2e8f0',
+      success: '#10b981',
+      warning: '#f59e0b',
+      error: '#ef4444',
+      info: '#06b6d4'
+    },
+    fonts: {
+      primary: 'Inter, sans-serif',
+      secondary: 'Inter, sans-serif',
+      mono: 'Fira Code, monospace'
+    },
+    direction: 'ltr'
+  },
+  {
+    id: 'dark',
+    name: 'Dark',
+    colors: {
+      primary: '#3b82f6',
+      secondary: '#818cf8',
+      background: '#0f172a',
+      surface: '#1e293b',
+      text: '#f8fafc',
+      textSecondary: '#94a3b8',
+      border: '#334155',
+      success: '#10b981',
+      warning: '#f59e0b',
+      error: '#ef4444',
+      info: '#06b6d4'
+    },
+    fonts: {
+      primary: 'Inter, sans-serif',
+      secondary: 'Inter, sans-serif',
+      mono: 'Fira Code, monospace'
+    },
+    direction: 'ltr'
+  },
+  {
+    id: 'arabic',
+    name: 'Arabic',
+    colors: {
+      primary: '#10b981',
+      secondary: '#059669',
+      background: '#0f172a',
+      surface: '#1e293b',
+      text: '#f8fafc',
+      textSecondary: '#94a3b8',
+      border: '#334155',
+      success: '#10b981',
+      warning: '#f59e0b',
+      error: '#ef4444',
+      info: '#06b6d4'
+    },
+    fonts: {
+      primary: 'Cairo, sans-serif',
+      secondary: 'Cairo, sans-serif',
+      mono: 'Fira Code, monospace'
+    },
+    direction: 'rtl'
+  }
+];
+
+class ThemeManager {
+  private currentTheme: Theme = themes[1]; // dark افتراضي
+  private listeners: Array<(theme: Theme) => void> = [];
+
+  setTheme(themeId: string): boolean {
+    const theme = themes.find(t => t.id === themeId);
+    if (!theme) return false;
+
+    this.currentTheme = theme;
+    this.notifyListeners();
+    this.applyTheme();
+    return true;
+  }
+
+  getCurrentTheme(): Theme {
+    return this.currentTheme;
+  }
+
+  getTheme(themeId: string): Theme | undefined {
+    return themes.find(t => t.id === themeId);
+  }
+
+  getAllThemes(): Theme[] {
+    return [...themes];
+  }
+
+  subscribe(listener: (theme: Theme) => void) {
+    this.listeners.push(listener);
+  }
+
+  private notifyListeners() {
+    this.listeners.forEach(listener => listener(this.currentTheme));
+  }
+
+  private applyTheme() {
+    const root = document.documentElement;
+
+    // تطبيق الألوان
+    Object.entries(this.currentTheme.colors).forEach(([key, value]) => {
+      root.style.setProperty(`--color-${key}`, value);
+    });
+
+    // تطبيق الخطوط
+    Object.entries(this.currentTheme.fonts).forEach(([key, value]) => {
+      root.style.setProperty(`--font-${key}`, value);
+    });
+
+    // تطبيق الاتجاه
+    root.dir = this.currentTheme.direction;
+    root.lang = this.currentTheme.direction === 'rtl' ? 'ar' : 'en';
+  }
+}
+
+// الاستخدام:
+const themeManager = new ThemeManager();
+
+// تغيير theme
+themeManager.setTheme('arabic');
+
+// الاستماع للتغييرات
+themeManager.subscribe((theme) => {
+  console.log(`Theme changed to ${theme.name}`);
+});
+```
+
+---
+
+## **📊 ملخص الحلول المقترحة**
+
+| **الفئة** | **عدد المشاكل** | **الحلول المقترحة** | **الأولوية** |
+|-----------|------------------|---------------------|--------------|
+| هيكلية | 3 | نظام أخطاء موحد، توثيق فني، Build System | 🔴 عالية |
+| أداء | 3 | إدارة ذاكرة، Debouncing، Web Workers | 🔴 عالية |
+| كود ومنطق | 4 | Type Safety، Validation، Error Boundaries، Undo/Redo | 🟡 متوسطة |
+| تصدير | 2 | STEP Export، Export Service موحد | 🟡 متوسطة |
+| اختبارات | 2 | اختبارات شاملة، Mocking | 🟡 متوسطة |
+| Python Script | 2 | تحسين patch_render.py، Patch Management | 🟢 منخفضة |
+| واجهة المستخدم | 3 | Notifications، Hotkeys، Localization | 🟢 منخفضة |
+| أمان | 2 | Input Sanitization، Rate Limiting | 🔴 عالية |
+| صيانة | 3 | Logging، Health Checks، Documentation | 🟡 متوسطة |
+| توسع | 2 | Plugin System، Theme System | 🟢 منخفضة |
+
+---
+
+## **🎯 الخطة التنفيذية**
+
+### **المرحلة 1: الإصلاحات الحرجة (1-2 أسابيع)**
+1. **إصلاح مشاكل الذاكرة**
+   - تحسين `CSGProcessor.ts` و `ThreeCanvas.tsx`
+   - إضافة mechanism للتخلص من geometries
+   - إضافة Web Workers للـ operations الثقيلة
+
+2. **إصلاح نظام الأخطاء**
+   - دمج جميع أنظمة الأخطاء في نظام واحد
+   - إضافة Error Boundaries لجميع المكونات
+   - إضافة نظام إشعارات للمستخدم
+
+3. **إصلاح مشاكل الأمان**
+   - إضافة Input Sanitization
+   - إضافة Rate Limiting
+   - تحسين Validation
+
+### **المرحلة 2: التحسينات الهيكلية (2-3 أسابيع)**
+1. **تحسين Type Safety**
+   - استبدال `any` ب types دقيقة
+   - إضافة Zod Validation
+   - تحسين interfaces
+
+2. **تحسين نظام الاختبارات**
+   - إضافة اختبارات شاملة
+   - إضافة Mocking لـ Three.js
+   - إضافة Performance Tests
+
+3. **تحسين نظام التصدير**
+   - إنشاء Export Service موحد
+   - تحسين STEP Export
+   - إضافة validation للـ exports
+
+### **المرحلة 3: التحسينات الوظيفية (3-4 أسابيع)**
+1. **إضافة نظام Localization**
+   - إنشاء نظام translation مركزي
+   - دعم RTL/LTR
+   - دعم متعددة اللغات
+
+2. **إضافة نظام Hotkeys**
+   - إضافة shortcuts للكيboard
+   - دعم قابل للتخصيص
+
+3. **إضافة نظام Logging**
+   - إنشاء Logger مركزي
+   - إضافة Health Checks
+   - إضافة Monitoring
+
+### **المرحلة 4: التحسينات التوسعية (4-6 أسابيع)**
+1. **إضافة Plugin System**
+   - إنشاء architecture للـ plugins
+   - دعم إضافة وظائف جديدة
+
+2. **إضافة Theme System**
+   - دعم dark/light mode
+   - دعم RTL
+   - دعم themes مخصصة
+
+3. **تحسين Documentation**
+   - إضافة TypeDoc
+   - تحسين JSDoc
+   - إضافة أمثلة
+
+---
+
+## **📈 التوصيات العامة**
+
+### **1. تحسين الأداء**
+- **استخدام Web Workers**: نقل عمليات CSG الثقيلة إلى workers
+- **Debouncing**: إضافة debounce للمدخلات السريعة
+- **Memory Management**: تحسين إدارة الذاكرة للـ geometries
+- **Lazy Loading**: تحميل المكونات الثقيلة عند الحاجة
+
+### **2. تحسين الجودة**
+- **Type Safety**: استخدام types دقيقة بدلاً من `any`
+- **Validation**: إضافة validation لكل inputs
+- **Error Handling**: نظام أخطاء موحد وشامل
+- **Testing**: إضافة اختبارات شاملة
+
+### **3. تحسين تجربة المستخدم**
+- **Feedback**: إضافة إشعارات واضحة للمستخدم
+- **Loading Indicators**: إضافة مؤشرات تحميل
+- **Hotkeys**: إضافة shortcuts للكيboard
+- **Localization**: دعم متعددة اللغات
+
+### **4. تحسين الصيانة**
+- **Logging**: نظام logging مركزي
+- **Health Checks**: monitoring للـ application
+- **Documentation**: توثيق فني شامل
+- **Patch Management**: نظام لإدارة patches
+
+### **5. تحسين الأمن**
+- **Input Sanitization**: تنظيف جميع المدخلات
+- **Rate Limiting**: حماية من DDoS
+- **Validation**: التحقق من جميع البيانات
+
+---
+
+## **🔚 الخاتمة**
+
+قمت بمراجعة شاملة لنظام **MecaFlow-CAD V2.3** واكتشفت **40+ مشكلة** في مختلف الجوانب التقنية، المنطقية، والأمنية. الحلول المقترحة تغطي:
+
+1. **إصلاح المشاكل الحرجة** (ذاكرة، أخطاء، أمان)
+2. **تحسين الجودة** (Type Safety، Validation، Testing)
+3. **تحسين الأداء** (Web Workers، Debouncing)
+4. **تحسين تجربة المستخدم** (Notifications، Hotkeys)
+5. **تحسين الصيانة** (Logging، Documentation)
+
+**التوصية النهائية**: البدء بإصلاح المشاكل الحرجة (المرحلة 1) ثم الانتقال إلى التحسينات الهيكلية (المرحلة 2) قبل إضافة الميزات الجديدة ؟

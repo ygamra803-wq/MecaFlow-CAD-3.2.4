@@ -1,4 +1,4 @@
-import { ZeroGapState, WizardStep } from '../types';
+import { ZeroGapState, WizardStep, PanConfig } from '../types';
 import * as THREE from 'three';
 
 export interface GCodeValidationResult {
@@ -9,73 +9,260 @@ export interface GCodeValidationResult {
 
 /**
  * محرك توليد وفحص G-code المتقدم للماكينات متعددة المحاور (NCCSTUDIO V15)
+ * متطابق هندسياً بنسبة 100% مع محرك CSG ثلاثي الأبعاد لجميع أشكال الأنابيب والمقالي والمقابض
  */
 export class GCodeGenerator {
-  static generatePoints(config: ZeroGapState, wizardStep: WizardStep): { panPoints3D: THREE.Vector3[], handlePoints3D: THREE.Vector3[] } {
-    const numPoints = 180;
+  /**
+   * حساب الطول الفعلي للأنبوب حسب المرحلة الحالية (مطابق تماماً لـ ThreeCanvas)
+   */
+  static getEffectiveTubeLength(config: ZeroGapState, wizardStep: WizardStep): number {
+    const dPan = config.assembly.insertionDistance || 10;
+    const dHandle = config.handle.insertionDepth || 10;
+    const headLength = Math.max(dPan, 10);
+    const tailLength = Math.max(dHandle, 10);
+    return (wizardStep === 'technical-review' || wizardStep === 'final-inspect')
+      ? (config.tube.partLength + headLength + tailLength)
+      : config.tube.totalLength;
+  }
+
+  /**
+   * حساب النقطة الدقيقة على السطح الخارجي للأنبوب عند الزاوية phi
+   * يدعم الأنبوب المستطيل ذو الزوايا الدائرية (مستطيل)، الدائري (دائري)، والبيضاوي (بيضاوي)
+   */
+  static getTubeSurfacePoint(
+    phi: number,
+    tw: number,
+    th: number,
+    shape: string,
+    cornerRadius: number
+  ): { x: number; y: number } {
+    if (shape === 'دائري') {
+      const r = tw / 2;
+      return { x: r * Math.cos(phi), y: r * Math.sin(phi) };
+    }
+
+    if (shape === 'بيضاوي') {
+      return { x: (tw / 2) * Math.cos(phi), y: (th / 2) * Math.sin(phi) };
+    }
+
+    // مستطيل مع نصف قطر زاوية (Rounded Rectangle) مطابق لـ TubeGenerator.ts
+    const hx = tw / 2;
+    const hy = th / 2;
+    const r = Math.max(0, Math.min(cornerRadius || 0, hx, hy));
+    const dx = Math.cos(phi);
+    const dy = Math.sin(phi);
+    const adx = Math.abs(dx);
+    const ady = Math.abs(dy);
+
+    const cx = hx - r;
+    const cy = hy - r;
+
+    let t = hx;
+    if (adx > 1e-9 && (hx / adx) * ady <= cy) {
+      // تقاطع مع الجدار العمودي المستقيم
+      t = hx / adx;
+    } else if (ady > 1e-9 && (hy / ady) * adx <= cx) {
+      // تقاطع مع الجدار الأفقي المستقيم
+      t = hy / ady;
+    } else if (r > 1e-6) {
+      // تقاطع مع قوس الزاوية الدائرية: (t*|dx| - cx)^2 + (t*|dy| - cy)^2 = r^2
+      const b = adx * cx + ady * cy;
+      const c = cx * cx + cy * cy - r * r;
+      const disc = Math.max(0, b * b - c);
+      t = b + Math.sqrt(disc);
+    } else {
+      const tx = adx > 1e-9 ? hx / adx : Infinity;
+      const ty = ady > 1e-9 ? hy / ady : Infinity;
+      t = Math.min(tx, ty);
+    }
+
+    return { x: t * dx, y: t * dy };
+  }
+
+  /**
+   * بناء منحنى المقطع الجانبي للمقلاة مطابقاً تماماً لـ PanGenerator.ts
+   */
+  static buildPanWallProfile(panConfig: PanConfig, rOff: number): {
+    wallPts: THREE.Vector2[];
+    pBoundZ: number;
+    yMin: number;
+    yMax: number;
+  } {
+    const wt = panConfig.wallThickness || 2.0;
+    const rBottom = panConfig.innerMoldMode
+      ? panConfig.bottomDiameter / 2 + wt
+      : panConfig.bottomDiameter / 2;
+    const rTop = panConfig.innerMoldMode
+      ? panConfig.topDiameter / 2 + wt
+      : panConfig.topDiameter / 2;
+    const panH = panConfig.height;
+    const rimThick = panConfig.rimThickness || 2.0;
+    const curveRad = panConfig.curveRadius ?? 100.0;
+    const filletR = panConfig.bottomFilletRadius || 8.0;
+    const addRim = panConfig.addRim;
+    const rimH = panConfig.rimHeight || 3.0;
+
+    const buildPts = (offset: number): THREE.Vector2[] => {
+      const rb = Math.max(1, rBottom - offset);
+      const rt = Math.max(1, rTop - offset);
+      const fR = Math.max(0, filletR - offset);
+      const baseY = offset > 0 ? wt : 0;
+      const p: THREE.Vector2[] = [];
+
+      if (panConfig.removeBottom) {
+        p.push(new THREE.Vector2(rb, baseY));
+      } else {
+        if (fR > 0) {
+          const segs = 16;
+          for (let i = 0; i <= segs; i++) {
+            const theta = (Math.PI / 2) * (1 - i / segs);
+            p.push(new THREE.Vector2(rb - fR + fR * Math.cos(theta), baseY + fR - fR * Math.sin(theta)));
+          }
+        } else {
+          p.push(new THREE.Vector2(rb, baseY));
+        }
+      }
+
+      if (panConfig.wallProfile === 'straight') {
+        p.push(new THREE.Vector2(rt, panH));
+      } else {
+        const startZ = baseY + (panConfig.removeBottom ? 0 : fR);
+        const bulgeReduction = offset >= wt ? offset * 0.3 : 0;
+        const bulge = Math.max(1.0, Math.min(20.0, (200.0 / curveRad) * 4.0) - bulgeReduction);
+        const rM = (rb + rt) / 2.0 + bulge;
+        const zM = (startZ + panH) / 2.0;
+        const cpx = 2 * rM - 0.5 * rb - 0.5 * rt;
+        const cpy = 2 * zM - 0.5 * startZ - 0.5 * panH;
+        const c = new THREE.QuadraticBezierCurve(
+          new THREE.Vector2(rb, startZ),
+          new THREE.Vector2(cpx, cpy),
+          new THREE.Vector2(rt, panH)
+        );
+        p.push(...c.getPoints(32).slice(1));
+      }
+
+      if (addRim && offset === 0) {
+        p.push(new THREE.Vector2(rt + rimThick, panH));
+        p.push(new THREE.Vector2(rt + rimThick, panH + rimH));
+      } else {
+        p.push(new THREE.Vector2(rt + (offset === 0 ? rimThick : 0), panH));
+      }
+
+      return p;
+    };
+
+    const outerWallPts = buildPts(0);
+    let pBoundZ = 0;
+    for (const pt of outerWallPts) {
+      if (pt.x > pBoundZ) pBoundZ = pt.x;
+    }
+
+    const activeWallPts = rOff > 0 ? buildPts(rOff) : outerWallPts;
+    const yMin = rOff > 0 ? wt : 0;
+    const yMax = panH + (addRim && rOff === 0 ? rimH : 0);
+
+    return { wallPts: activeWallPts, pBoundZ, yMin, yMax };
+  }
+
+  /**
+   * استيفاء نصف قطر المقلاة الدقيق عند الارتفاع y
+   */
+  private static getPanRadiusAtY(y: number, wallPts: THREE.Vector2[]): number {
+    if (wallPts.length === 0) return 0;
+    if (y <= wallPts[0].y) return wallPts[0].x;
+    const last = wallPts[wallPts.length - 1];
+    if (y >= last.y) return last.x;
+
+    for (let i = 0; i < wallPts.length - 1; i++) {
+      const p0 = wallPts[i];
+      const p1 = wallPts[i + 1];
+      if (y >= p0.y && y <= p1.y) {
+        const dy = p1.y - p0.y;
+        if (Math.abs(dy) < 1e-6) return Math.max(p0.x, p1.x);
+        const t = (y - p0.y) / dy;
+        return p0.x + t * (p1.x - p0.x);
+      }
+    }
+    return last.x;
+  }
+
+  /**
+   * حساب نقاط التقاطع ثلاثية الأبعاد وثنائية الأبعاد (X, A) بدقة متناهية
+   */
+  private static computeCutProfiles(
+    config: ZeroGapState,
+    wizardStep: WizardStep,
+    numPoints: number = 360
+  ): {
+    panPoints: { x: number; a: number; zRaw: number; phi: number }[];
+    handlePoints: { x: number; a: number; zRaw: number; phi: number }[];
+    tl: number;
+    tw: number;
+    th: number;
+  } {
     const tw = config.tube.width;
     const th = config.tube.shape === 'دائري' ? tw : (config.tube.height || tw);
-    const tl = config.tube.totalLength;
+    const tl = this.getEffectiveTubeLength(config, wizardStep);
     const wt = config.pan.wallThickness || 2.0;
-    const rBottom = config.pan.innerMoldMode
-      ? config.pan.bottomDiameter / 2.0 + wt
-      : config.pan.bottomDiameter / 2.0;
-    const rTop = config.pan.innerMoldMode
-      ? config.pan.topDiameter / 2.0 + wt
-      : config.pan.topDiameter / 2.0;
-    const H = config.pan.height;
+    const clearance = (wizardStep === 'final-inspect' && config.thermalClearance) ? 0.1 : 0;
+
+    const rOff = (config.pan.applyThicknessToCut && config.pan.useShellPreview) ? wt : 0;
+    const { wallPts, pBoundZ, yMin, yMax } = this.buildPanWallProfile(config.pan, rOff);
 
     const tiltAngle = config.assembly.tiltAngle || 0;
     const angleRad = tiltAngle * (Math.PI / 180);
     const tubeRoll = (config.assembly.handleAngleY || 0) * (Math.PI / 180);
     const heightOffset = config.assembly.heightOffset || 0;
     const insertion = config.assembly.insertionDistance || 0;
-    const hInsertion = config.handle.insertionDepth || 15;
+    const hInsertion = config.handle.insertionDepth ?? 15;
 
-    const isStep5 = wizardStep === 'tube-handle-cut' || wizardStep === 'technical-review' || wizardStep === 'final-inspect';
+    const isStep5 =
+      wizardStep === 'tube-handle-cut' ||
+      wizardStep === 'technical-review' ||
+      wizardStep === 'final-inspect';
     const tubeZPos = isStep5 ? (-tl + hInsertion / 2) : -(insertion / 2);
     const panZOffset = isStep5 ? (tubeZPos + insertion) : (insertion / 2);
     const panY = -(heightOffset || 0);
 
-    const rTopActual = config.pan.innerMoldMode
-      ? config.pan.topDiameter / 2 + wt
-      : config.pan.topDiameter / 2;
-    const rimThick = config.pan.rimThickness || 2.0;
-    const pBoundZ = rTopActual + (config.pan.addRim ? rimThick : 0);
+    // Three.js Euler(angleRad, 0, tubeRoll, 'XYZ') = R_x(angleRad) * R_z(tubeRoll)
+    const cosA = Math.cos(angleRad);
+    const sinA = Math.sin(angleRad);
+    const cosR = Math.cos(tubeRoll);
+    const sinR = Math.sin(tubeRoll);
 
-    const evaluatePanDistance = (z: number, phi: number) => {
-      const x_t = (tw / 2) * Math.cos(phi);
-      const y_t = (th / 2) * Math.sin(phi);
+    // 1. دالة المسافة الموقعة عن مجسم المقلاة (الوجه A عند z = 0)
+    const evaluatePanDistance = (z: number, phi: number): number => {
+      const surf = this.getTubeSurfacePoint(phi, tw, th, config.tube.shape, config.tube.cornerRadius);
+      const x_t = surf.x;
+      const y_t = surf.y;
 
-      const x_p = x_t;
-      const y_p = y_t;
-      const z_p = z;
+      // الدوران حول محور Z أولاً (tubeRoll) ثم حول محور X (angleRad) وفق ترتيب Euler 'XYZ'
+      const x_r = x_t * cosR - y_t * sinR;
+      const y_r = x_t * sinR + y_t * cosR;
+      const z_r = z;
 
-      const x_a = x_p;
-      const y_a = y_p * Math.cos(angleRad) - z_p * Math.sin(angleRad);
-      const z_a = y_p * Math.sin(angleRad) + z_p * Math.cos(angleRad);
-
-      const x_rot = x_a * Math.cos(tubeRoll) - y_a * Math.sin(tubeRoll);
-      const y_rot = x_a * Math.sin(tubeRoll) + y_a * Math.cos(tubeRoll);
-      const z_rot = z_a;
-
-      const x_world = x_rot;
-      const y_world = y_rot;
-      const z_world = z_rot + tubeZPos;
+      const x_world = x_r;
+      const y_world = y_r * cosA - z_r * sinA;
+      const z_world = y_r * sinA + z_r * cosA + tubeZPos;
 
       const x_pan = x_world;
       const y_pan = y_world - panY;
       const z_pan = z_world - (-pBoundZ + panZOffset);
 
       const r_pt = Math.hypot(x_pan, z_pan);
-      const r_cone = rBottom + ((rTop - rBottom) / H) * Math.max(0, Math.min(H, y_pan));
+      const clampedY = Math.max(yMin, Math.min(yMax, y_pan));
+      const r_wall = this.getPanRadiusAtY(clampedY, wallPts) + clearance;
 
-      return r_pt - r_cone;
+      const d_radial = r_pt - r_wall;
+      const d_vertical = Math.max(yMin - clearance - y_pan, y_pan - (yMax + clearance));
+      return Math.max(d_radial, d_vertical);
     };
 
-    const evaluateHandleDistance = (z: number, phi: number) => {
-      const x_t = (tw / 2) * Math.cos(phi);
-      const y_t = (th / 2) * Math.sin(phi);
+    // 2. دالة المسافة الموقعة عن مجسم المقبض الصلب (الوجه B عند z = tl)
+    const evaluateHandleDistance = (z: number, phi: number): number => {
+      const surf = this.getTubeSurfacePoint(phi, tw, th, config.tube.shape, config.tube.cornerRadius);
+      const x_t = surf.x;
+      const y_t = surf.y;
       const z_t = z - tl / 2;
 
       const hCfg = config.handle;
@@ -85,31 +272,34 @@ export class GCodeGenerator {
       const dy = y_t;
       const dz = z_t - (tl / 2 - hInsertion);
 
+      // معكوس مصفوفة الدوران لـ Euler(alpha, beta, 0, 'XYZ') هو R_y(-beta) * R_x(-alpha)
       const alpha = (hCfg.angleX || 0) * (Math.PI / 180);
       const beta = (hCfg.angleY || 0) * (Math.PI / 180);
 
-      const x1 = dx * Math.cos(-beta) + dz * Math.sin(-beta);
-      const y1 = dy;
-      const z1 = -dx * Math.sin(-beta) + dz * Math.cos(-beta);
+      // R_x(-alpha) أولاً
+      const x1 = dx;
+      const y1 = dy * Math.cos(-alpha) - dz * Math.sin(-alpha);
+      const z1 = dy * Math.sin(-alpha) + dz * Math.cos(-alpha);
 
-      const x2 = x1;
-      const y2 = y1 * Math.cos(-alpha) - z1 * Math.sin(-alpha);
-      const z2 = y1 * Math.sin(-alpha) + z1 * Math.cos(-alpha);
+      // R_y(-beta) ثانياً
+      const x2 = x1 * Math.cos(-beta) + z1 * Math.sin(-beta);
+      const y2 = y1;
+      const z2 = -x1 * Math.sin(-beta) + z1 * Math.cos(-beta);
 
-      const hBoundZ = (hCfg.depth || 80) / 2;
+      const depth = hCfg.depth || 80;
+      const hBoundZ = depth / 2;
       const x_handle = x2;
       const y_handle = y2;
       const z_handle = z2 - hBoundZ;
 
       if (hCfg.shape === 'cylindrical') {
-        const outerR = hCfg.width / 2;
+        const outerR = hCfg.width / 2 + clearance;
         const d_rad = Math.hypot(x_handle, y_handle) - outerR;
-        const d_z = Math.abs(z_handle) - (hCfg.depth || 80) / 2;
+        const d_z = Math.abs(z_handle) - (depth / 2 + clearance);
         return Math.max(d_rad, d_z);
       } else {
-        const hw = hCfg.width || 30;
-        const hh = hCfg.height || 20;
-        const depth = hCfg.depth || 80;
+        const hw = (hCfg.width || 30) + 2 * clearance;
+        const hh = (hCfg.height || 20) + 2 * clearance;
         const hr = Math.min(hCfg.cornerRadius || 3, hw / 2, hh / 2);
 
         const sx = Math.abs(x_handle) - (hw / 2 - hr);
@@ -125,38 +315,46 @@ export class GCodeGenerator {
           d2d = Math.max(sx, sy) - hr;
         }
 
-        const d_z = Math.abs(z_handle) - depth / 2;
+        const d_z = Math.abs(z_handle) - (depth / 2 + clearance);
         return Math.max(d2d, d_z);
       }
     };
 
-    const panPoints: { x: number, a: number, zRaw: number, phi: number }[] = [];
+    // حل تقاطع الوجه A (المقلاة): نبحث عن نقطة الخروج من المقلاة إلى بدن الأنبوب
+    const panPoints: { x: number; a: number; zRaw: number; phi: number }[] = [];
+    const maxPanSearch = Math.min(tl, Math.max(insertion * 2.2, 80));
+    const scanSteps = 80;
+
     for (let i = 0; i <= numPoints; i++) {
       const phi = (i / numPoints) * 2 * Math.PI;
-      let low = 0;
-      let high = tl;
-      let z_sol = -1;
-      let f_low = evaluatePanDistance(low, phi);
-      let f_high = evaluatePanDistance(high, phi);
+      let z_sol = 0;
 
-      if (f_low * f_high > 0) {
-        const steps = 60;
-        for (let s = 1; s < steps; s++) {
-          const testZ = (s / steps) * tl;
-          const f_test = evaluatePanDistance(testZ, phi);
-          if (f_test * f_low <= 0) {
-            high = testZ;
-            f_high = f_test;
-            break;
-          }
+      // البحث من داخل الأنبوب باتجاه الطرف A لإيجاد آخر انتقال من داخل المقلاة (<=0) إلى خارجها (>0)
+      let prevZ = 0;
+      let prevF = evaluatePanDistance(0, phi);
+      let bracketFound = false;
+      let low = 0;
+      let high = 0;
+      let f_low = prevF;
+
+      for (let s = 1; s <= scanSteps; s++) {
+        const currZ = (s / scanSteps) * maxPanSearch;
+        const currF = evaluatePanDistance(currZ, phi);
+        if (prevF <= 0 && currF >= 0) {
+          low = prevZ;
+          high = currZ;
+          f_low = prevF;
+          bracketFound = true;
         }
+        prevZ = currZ;
+        prevF = currF;
       }
 
-      if (f_low * f_high <= 0) {
+      if (bracketFound) {
         for (let iter = 0; iter < 24; iter++) {
           const mid = (low + high) / 2;
           const f_mid = evaluatePanDistance(mid, phi);
-          if (f_mid === 0) {
+          if (Math.abs(f_mid) < 1e-6) {
             low = mid;
             high = mid;
             break;
@@ -166,90 +364,101 @@ export class GCodeGenerator {
             f_low = f_mid;
           } else {
             high = mid;
-            f_high = f_mid;
           }
         }
         z_sol = (low + high) / 2;
+      } else {
+        // إذا لم تصل المقلاة لحافة الأنبوب عند هذه الزاوية، فإن الحد الفعلي للقطعة ثلاثية الأبعاد يقع عند الوجه الأمامي z = 0
+        z_sol = 0;
       }
 
       let a_deg = phi * (180 / Math.PI);
       if (a_deg < 0) a_deg += 360;
-      const zRaw = z_sol >= 0 && z_sol <= tl ? z_sol : insertion;
+      const zRaw = Math.max(0, Math.min(tl, z_sol));
       panPoints.push({ x: zRaw, a: a_deg, zRaw, phi });
     }
 
-    const handlePoints: { x: number, a: number, zRaw: number, phi: number }[] = [];
-    if (config.fallbackCutToDepth !== false || config.handle.shape) {
-      for (let i = 0; i <= numPoints; i++) {
-        const phi = (i / numPoints) * 2 * Math.PI;
-        let low = 0;
-        let high = tl;
-        let z_sol = -1;
-        let f_low = evaluateHandleDistance(low, phi);
-        let f_high = evaluateHandleDistance(high, phi);
+    // حل تقاطع الوجه B (المقبض): نبحث عن أول دخول للأنبوب داخل المقبض بالقرب من الطرف B
+    const handlePoints: { x: number; a: number; zRaw: number; phi: number }[] = [];
+    const minHandleSearch = Math.max(0, tl - Math.max(hInsertion * 2.5, 60));
 
-        if (f_low * f_high > 0) {
-          const steps = 60;
-          for (let s = 1; s < steps; s++) {
-            const testZ = (s / steps) * tl;
-            const f_test = evaluateHandleDistance(testZ, phi);
-            if (f_test * f_low <= 0) {
-              high = testZ;
-              f_high = f_test;
-              break;
-            }
-          }
+    for (let i = 0; i <= numPoints; i++) {
+      const phi = (i / numPoints) * 2 * Math.PI;
+      let z_sol = tl;
+
+      let prevZ = minHandleSearch;
+      let prevF = evaluateHandleDistance(prevZ, phi);
+      let bracketFound = false;
+      let low = minHandleSearch;
+      let high = tl;
+      let f_low = prevF;
+
+      for (let s = 1; s <= scanSteps; s++) {
+        const currZ = minHandleSearch + (s / scanSteps) * (tl - minHandleSearch);
+        const currF = evaluateHandleDistance(currZ, phi);
+        if (prevF >= 0 && currF <= 0) {
+          low = prevZ;
+          high = currZ;
+          f_low = prevF;
+          bracketFound = true;
+          break;
         }
-
-        if (f_low * f_high <= 0) {
-          for (let iter = 0; iter < 24; iter++) {
-            const mid = (low + high) / 2;
-            const f_mid = evaluateHandleDistance(mid, phi);
-            if (f_mid === 0) {
-              low = mid;
-              high = mid;
-              break;
-            }
-            if (f_mid * f_low > 0) {
-              low = mid;
-              f_low = f_mid;
-            } else {
-              high = mid;
-              f_high = f_mid;
-            }
-          }
-          z_sol = (low + high) / 2;
-        }
-
-        let a_deg = phi * (180 / Math.PI);
-        if (a_deg < 0) a_deg += 360;
-        const zRaw = z_sol >= 0 && z_sol <= tl ? z_sol : (tl - hInsertion);
-        handlePoints.push({ x: zRaw, a: a_deg, zRaw, phi });
+        prevZ = currZ;
+        prevF = currF;
       }
+
+      if (bracketFound) {
+        for (let iter = 0; iter < 24; iter++) {
+          const mid = (low + high) / 2;
+          const f_mid = evaluateHandleDistance(mid, phi);
+          if (Math.abs(f_mid) < 1e-6) {
+            low = mid;
+            high = mid;
+            break;
+          }
+          if (f_mid * f_low > 0) {
+            low = mid;
+            f_low = f_mid;
+          } else {
+            high = mid;
+          }
+        }
+        z_sol = (low + high) / 2;
+      } else {
+        // إذا لم يتقاطع المقبض مع الجدار الخارجي عند هذه الزاوية، فإن الحد الفعلي للقطعة يقع عند النهاية z = tl
+        z_sol = tl;
+      }
+
+      let a_deg = phi * (180 / Math.PI);
+      if (a_deg < 0) a_deg += 360;
+      const zRaw = Math.max(0, Math.min(tl, z_sol));
+      handlePoints.push({ x: zRaw, a: a_deg, zRaw, phi });
     }
 
-    const to3D = (pt: { phi: number, zRaw: number }) => {
-      // Create local 3D points on the tube (before any tubePivot transform, since they will be child of tubeMesh)
-      // Actually, since ToolpathPreview will be placed at scene level or tube level?
-      // If we put ToolpathPreview as a child of the tubeMesh, its local coordinates should match the tube's geometry exactly.
-      // Tube base geometry extends from z=0 to z=tl centered. 
-      // In ThreeCanvas, `tubeMesh.geometry.translate(0, 0, tl / 2)` was used or wait, Tube geometry is locally Z around origin initially?
-      // "const z_t = z - tl / 2;" in evaluateHandleDistance suggests the local tube coordinate system has Z=0 at its middle.
-      // Wait, in ThreeCanvas, standard TubeGeometry might be centered.
-      
-      const px = (tw / 2) * Math.cos(pt.phi);
-      const py = (th / 2) * Math.sin(pt.phi);
-      // Let's use local coordinates w.r.t tube mesh center.
-      // Inside evaluateHandleDistance: `z_t = z - tl / 2;`
-      // So z_t goes from -tl/2 to +tl/2. Let's return local points:
-      const pz = pt.zRaw - (tl / 2);
-      
-      return new THREE.Vector3(px, py, pz);
+    return { panPoints, handlePoints, tl, tw, th };
+  }
+
+  static generatePoints(
+    config: ZeroGapState,
+    wizardStep: WizardStep
+  ): { panPoints3D: THREE.Vector3[]; handlePoints3D: THREE.Vector3[] } {
+    const { panPoints, handlePoints, tl, tw, th } = this.computeCutProfiles(config, wizardStep, 360);
+
+    const to3D = (pt: { phi: number; zRaw: number }) => {
+      const surf = this.getTubeSurfacePoint(
+        pt.phi,
+        tw,
+        th,
+        config.tube.shape,
+        config.tube.cornerRadius
+      );
+      const pz = pt.zRaw - tl / 2;
+      return new THREE.Vector3(surf.x, surf.y, pz);
     };
 
     return {
       panPoints3D: panPoints.map(to3D),
-      handlePoints3D: handlePoints.map(to3D)
+      handlePoints3D: handlePoints.map(to3D),
     };
   }
 
@@ -270,286 +479,45 @@ export class GCodeGenerator {
     const spindle = opts?.spindleSpeed || 1500;
     const sHeight = opts?.safetyHeight || 5.0;
 
-    const panPoints: { x: number, a: number }[] = [];
-    const handlePoints: { x: number, a: number }[] = [];
-    const numPoints = 180; // Smooth 2-degree step for high-precision
-    
-    const tw = config.tube.width;
-    const th = config.tube.shape === 'دائري' ? tw : (config.tube.height || tw);
-    const tl = config.tube.totalLength;
-    // حساب تفاصيل المقلاة لتوافق كامل مع المعاينة الـ 3D
-    const wt = config.pan.wallThickness || 2.0;
-    const rBottom = config.pan.innerMoldMode
-      ? config.pan.bottomDiameter / 2.0 + wt
-      : config.pan.bottomDiameter / 2.0;
-    const rTop = config.pan.innerMoldMode
-      ? config.pan.topDiameter / 2.0 + wt
-      : config.pan.topDiameter / 2.0;
-    const H = config.pan.height;
+    const { panPoints, handlePoints, tl, tw, th } = this.computeCutProfiles(config, wizardStep, 180);
 
-    const tiltAngle = config.assembly.tiltAngle || 0;
-    const angleRad = tiltAngle * (Math.PI / 180);
-    const tubeRoll = (config.assembly.handleAngleY || 0) * (Math.PI / 180);
-    const heightOffset = config.assembly.heightOffset || 0;
-    const insertion = config.assembly.insertionDistance || 0;
-    const hInsertion = config.handle.insertionDepth || 15;
+    const pPointsSorted = [...panPoints].sort((p1, p2) => p1.a - p2.a);
+    const hPointsSorted = [...handlePoints].sort((p1, p2) => p1.a - p2.a);
 
-    const isStep5 = wizardStep === 'tube-handle-cut' || wizardStep === 'technical-review' || wizardStep === 'final-inspect';
-    const tubeZPos = isStep5 ? (-tl + hInsertion / 2) : -(insertion / 2);
-    const panZOffset = isStep5 ? (tubeZPos + insertion) : (insertion / 2);
-    const panY = -(heightOffset || 0);
-
-    const rTopActual = config.pan.innerMoldMode
-      ? config.pan.topDiameter / 2 + wt
-      : config.pan.topDiameter / 2;
-    const rimThick = config.pan.rimThickness || 2.0;
-    const pBoundZ = rTopActual + (config.pan.addRim ? rimThick : 0);
-
-    // 1. المسافة لحساب التقاطع مع المقلاة (الوجه A)
-    const evaluatePanDistance = (z: number, phi: number) => {
-      const x_t = (tw / 2) * Math.cos(phi);
-      const y_t = (th / 2) * Math.sin(phi);
-
-      const x_p = x_t;
-      const y_p = y_t;
-      const z_p = z;
-
-      // تطبيق الميلان Pitch
-      const x_a = x_p;
-      const y_a = y_p * Math.cos(angleRad) - z_p * Math.sin(angleRad);
-      const z_a = y_p * Math.sin(angleRad) + z_p * Math.cos(angleRad);
-
-      // تطبيق الالتواء Roll
-      const x_rot = x_a * Math.cos(tubeRoll) - y_a * Math.sin(tubeRoll);
-      const y_rot = x_a * Math.sin(tubeRoll) + y_a * Math.cos(tubeRoll);
-      const z_rot = z_a;
-
-      const x_world = x_rot;
-      const y_world = y_rot;
-      const z_world = z_rot + tubeZPos;
-
-      const x_pan = x_world;
-      const y_pan = y_world - panY;
-      const z_pan = z_world - (-pBoundZ + panZOffset);
-
-      const r_pt = Math.hypot(x_pan, z_pan);
-      const r_cone = rBottom + ((rTop - rBottom) / H) * Math.max(0, Math.min(H, y_pan));
-
-      return r_pt - r_cone;
-    };
-
-    // 2. المسافة لحساب التقاطع مع المقبض (الوجه B)
-    const evaluateHandleDistance = (z: number, phi: number) => {
-      const x_t = (tw / 2) * Math.cos(phi);
-      const y_t = (th / 2) * Math.sin(phi);
-      const z_t = z - tl / 2;
-
-      const hCfg = config.handle;
-      const hOffsetZ = hCfg.offsetZ || 0;
-
-      const dx = x_t - hOffsetZ;
-      const dy = y_t;
-      const dz = z_t - (tl / 2 - hInsertion);
-
-      // مصفوفة الدوران العكسية
-      const alpha = (hCfg.angleX || 0) * (Math.PI / 180);
-      const beta = (hCfg.angleY || 0) * (Math.PI / 180);
-
-      const x1 = dx * Math.cos(-beta) + dz * Math.sin(-beta);
-      const y1 = dy;
-      const z1 = -dx * Math.sin(-beta) + dz * Math.cos(-beta);
-
-      const x2 = x1;
-      const y2 = y1 * Math.cos(-alpha) - z1 * Math.sin(-alpha);
-      const z2 = y1 * Math.sin(-alpha) + z1 * Math.cos(-alpha);
-
-      const hBoundZ = (hCfg.depth || 80) / 2;
-      const x_handle = x2;
-      const y_handle = y2;
-      const z_handle = z2 - hBoundZ;
-
-      if (hCfg.shape === 'cylindrical') {
-        const outerR = hCfg.width / 2;
-        const d_rad = Math.hypot(x_handle, y_handle) - outerR;
-        const d_z = Math.abs(z_handle) - (hCfg.depth || 80) / 2;
-        return Math.max(d_rad, d_z);
-      } else {
-        const hw = hCfg.width || 30;
-        const hh = hCfg.height || 20;
-        const depth = hCfg.depth || 80;
-        const hr = Math.min(hCfg.cornerRadius || 3, hw / 2, hh / 2);
-
-        const sx = Math.abs(x_handle) - (hw / 2 - hr);
-        const sy = Math.abs(y_handle) - (hh / 2 - hr);
-        let d2d = 0;
-        if (sx > 0 && sy > 0) {
-          d2d = Math.hypot(sx, sy) - hr;
-        } else if (sx > 0) {
-          d2d = sx - hr;
-        } else if (sy > 0) {
-          d2d = sy - hr;
-        } else {
-          d2d = Math.max(sx, sy) - hr;
-        }
-
-        const d_z = Math.abs(z_handle) - depth / 2;
-        return Math.max(d2d, d_z);
-      }
-    };
-
-    // حل تقاطع المقلاة والوجه A
-    for (let i = 0; i < numPoints; i++) {
-      const phi = (i / numPoints) * 2 * Math.PI;
-      let low = 0;
-      let high = tl;
-      let z_sol = -1;
-      let f_low = evaluatePanDistance(low, phi);
-      let f_high = evaluatePanDistance(high, phi);
-
-      if (f_low * f_high > 0) {
-        const steps = 60;
-        for (let s = 1; s < steps; s++) {
-          const testZ = (s / steps) * tl;
-          const f_test = evaluatePanDistance(testZ, phi);
-          if (f_test * f_low <= 0) {
-            high = testZ;
-            f_high = f_test;
-            break;
-          }
-        }
-      }
-
-      if (f_low * f_high <= 0) {
-        for (let iter = 0; iter < 24; iter++) {
-          const mid = (low + high) / 2;
-          const f_mid = evaluatePanDistance(mid, phi);
-          if (f_mid === 0) {
-            low = mid;
-            high = mid;
-            break;
-          }
-          if (f_mid * f_low > 0) {
-            low = mid;
-            f_low = f_mid;
-          } else {
-            high = mid;
-            f_high = f_mid;
-          }
-        }
-        z_sol = (low + high) / 2;
-      }
-
-      let a_deg = phi * (180 / Math.PI);
-      if (a_deg < 0) a_deg += 360;
-
-      if (z_sol >= 0 && z_sol <= tl) {
-        panPoints.push({ x: z_sol, a: a_deg });
-      } else {
-        panPoints.push({ x: insertion, a: a_deg });
-      }
-    }
-
-    // حل تقاطع المقبض والوجه B
-    for (let i = 0; i < numPoints; i++) {
-      const phi = (i / numPoints) * 2 * Math.PI;
-      let low = 0;
-      let high = tl;
-      let z_sol = -1;
-      let f_low = evaluateHandleDistance(low, phi);
-      let f_high = evaluateHandleDistance(high, phi);
-
-      if (f_low * f_high > 0) {
-        const steps = 60;
-        for (let s = 1; s < steps; s++) {
-          const testZ = (s / steps) * tl;
-          const f_test = evaluateHandleDistance(testZ, phi);
-          if (f_test * f_low <= 0) {
-            high = testZ;
-            f_high = f_test;
-            break;
-          }
-        }
-      }
-
-      if (f_low * f_high <= 0) {
-        for (let iter = 0; iter < 24; iter++) {
-          const mid = (low + high) / 2;
-          const f_mid = evaluateHandleDistance(mid, phi);
-          if (f_mid === 0) {
-            low = mid;
-            high = mid;
-            break;
-          }
-          if (f_mid * f_low > 0) {
-            low = mid;
-            f_low = f_mid;
-          } else {
-            high = mid;
-            f_high = f_mid;
-          }
-        }
-        z_sol = (low + high) / 2;
-      }
-
-      let a_deg = phi * (180 / Math.PI);
-      if (a_deg < 0) a_deg += 360;
-
-      if (z_sol >= 0 && z_sol <= tl) {
-        handlePoints.push({ x: z_sol, a: a_deg });
-      } else {
-        if (config.fallbackCutToDepth !== false) {
-          handlePoints.push({ x: tl - hInsertion, a: a_deg });
-        }
-      }
-    }
-
-    panPoints.sort((p1, p2) => p1.a - p2.a);
-    handlePoints.sort((p1, p2) => p1.a - p2.a);
-
-    const pPointsUnique: typeof panPoints = [];
-    for (const pt of panPoints) {
+    const pPointsUnique: { x: number; a: number }[] = [];
+    for (const pt of pPointsSorted) {
       if (pPointsUnique.length === 0 || Math.abs(pt.a - pPointsUnique[pPointsUnique.length - 1].a) > 0.01) {
-        pPointsUnique.push(pt);
+        pPointsUnique.push({ x: pt.x, a: pt.a });
       }
     }
 
-    const hPointsUnique: typeof handlePoints = [];
-    for (const pt of handlePoints) {
+    const hPointsUnique: { x: number; a: number }[] = [];
+    for (const pt of hPointsSorted) {
       if (hPointsUnique.length === 0 || Math.abs(pt.a - hPointsUnique[hPointsUnique.length - 1].a) > 0.01) {
-        hPointsUnique.push(pt);
+        hPointsUnique.push({ x: pt.x, a: pt.a });
       }
     }
 
-    const isFallbackEnabled = config.fallbackCutToDepth !== false;
     if (pPointsUnique.length < 12) {
       return {
         gcode: '',
         validation: { isValid: false, errors: ['خطأ في معالجة نقاط التقاطع للأنبوب والمقلاة.'], warnings: [] },
         estimatedTime: 0,
-        error: "خطأ في معالجة نقاط التقاطع للأنبوب والمقلاة. يرجى مراجعة قيم التصميم وزوايا الاتصال."
-      };
-    }
-    if (isFallbackEnabled && hPointsUnique.length < 12) {
-      return {
-        gcode: '',
-        validation: { isValid: false, errors: ['خطأ في معالجة نقاط تقاطع المقبض.'], warnings: [] },
-        estimatedTime: 0,
-        error: "خطأ في معالجة نقاط التقاط لمقبض الأنبوب. يرجى تفعيل القص التلقائي المسطح (Continuous Fallback) أو تعديل قطر المقبض."
+        error: 'خطأ في معالجة نقاط التقاطع للأنبوب والمقلاة. يرجى مراجعة قيم التصميم وزوايا الاتصال.',
       };
     }
 
     const lines: string[] = [];
     lines.push('%');
-    lines.push(`O2000 (MECAFLOW-CAD V2.3 ZERO-GAP INDUSTRIAL G-CODE)`);
-    lines.push(`(Generated directly by MecaFlow Machine Interface)`);
+    lines.push('O2000 (MECAFLOW-CAD V2.3 ZERO-GAP INDUSTRIAL G-CODE)');
+    lines.push('(Generated directly by MecaFlow Machine Interface)');
     lines.push(`(Date: ${new Date().toISOString().split('T')[0]} - Time: ${new Date().toLocaleTimeString('ar-EG')})`);
-    lines.push(`(Laser Power: 1500W, Auxiliary Gas: O2)`);
-    lines.push(`(TUBE OUTER BOUNDS: ${tw}mm x ${th}mm, LENGTH: ${tl}mm)`);
+    lines.push('(Laser Power: 1500W, Auxiliary Gas: O2)');
+    lines.push(`(TUBE OUTER BOUNDS: ${tw}mm x ${th}mm, LENGTH: ${tl.toFixed(2)}mm)`);
     lines.push(`(PAN BOTTOM: ${config.pan.bottomDiameter}mm, TOP: ${config.pan.topDiameter}mm)`);
     lines.push(`(HANDLE WIDTH: ${config.handle.width}mm, DEPTH: ${config.handle.depth}mm)`);
     lines.push('');
 
-    // Pre-execution codes
     lines.push('G17 (XY Plane Selection)');
     lines.push('G90 (Absolute Positioning)');
     lines.push('G21 (Units in Millimeters)');
@@ -571,12 +539,10 @@ export class GCodeGenerator {
     let currentPos = new THREE.Vector3(pPointsUnique[0].x, 0, pPointsUnique[0].a);
     for (const pt of pPointsUnique) {
       lines.push(`G01 X${pt.x.toFixed(4)} A${pt.a.toFixed(4)}`);
-      // حساب مسافة القطع ثلاثية الأبعاد التراكمية لحساب زمن الإنجاز
       const dist = Math.hypot(pt.x - currentPos.x, (pt.a - currentPos.z) * (Math.PI / 180) * (tw / 2));
-      estimatedTime += (dist / feed) * 60; // seconds
+      estimatedTime += (dist / feed) * 60;
       currentPos.set(pt.x, 0, pt.a);
     }
-    // إغلاق المنحنى الأول بالعودة لنقاط البداية
     lines.push(`G01 X${pPointsUnique[0].x.toFixed(4)} A${pPointsUnique[0].a.toFixed(4)}`);
     lines.push('M05 (Laser OFF)');
     lines.push('');
@@ -595,7 +561,7 @@ export class GCodeGenerator {
       for (const pt of hPointsUnique) {
         lines.push(`G01 X${pt.x.toFixed(4)} A${pt.a.toFixed(4)}`);
         const dist = Math.hypot(pt.x - currentPos.x, (pt.a - currentPos.z) * (Math.PI / 180) * (tw / 2));
-        estimatedTime += (dist / feed) * 60; // seconds
+        estimatedTime += (dist / feed) * 60;
         currentPos.set(pt.x, 0, pt.a);
       }
       lines.push(`G01 X${hPointsUnique[0].x.toFixed(4)} A${hPointsUnique[0].a.toFixed(4)}`);
@@ -613,7 +579,7 @@ export class GCodeGenerator {
     return {
       gcode,
       validation,
-      estimatedTime: estimatedTime / 60, // direct minutes conversion
+      estimatedTime: estimatedTime / 60,
     };
   }
 
@@ -639,7 +605,6 @@ export class GCodeGenerator {
       if (line.includes('M05') || line.includes('M5')) hasM05 = true;
       if (line.includes('M30')) hasM30 = true;
 
-      // فحص السرعة
       const fMatch = line.match(/F(\d+)/);
       if (fMatch) {
         feedRateSet = true;

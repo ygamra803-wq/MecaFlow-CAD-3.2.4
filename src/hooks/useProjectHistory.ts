@@ -1,9 +1,25 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { StorageBridge, localDB, ProjectRecord } from '../lib/storageBridge';
+import { ProjectGeometryState } from '../types';
+import { NotificationService } from '../lib/notificationService';
+import { Logger } from '../lib/logger';
+
+const MAX_HISTORY_SIZE = 50;
+
+/**
+ * مقارنة سريعة بين حالتين هندسيتين لتجنب تكدس العمليات المتطابقة في سجل التراجع
+ */
+function isSimilarGeometry(a: ProjectGeometryState | undefined, b: ProjectGeometryState | undefined): boolean {
+  if (!a || !b) return false;
+  try {
+    return JSON.stringify(a) === JSON.stringify(b);
+  } catch {
+    return false;
+  }
+}
 
 export function useProjectHistory(projectId?: string) {
-  // حالات إدارة التراجع والإعادة (Undo/Redo) محلياً في الذاكرة لتسريع الأداء
-  const [history, setHistory] = useState<any[]>([]);
+  const [history, setHistory] = useState<ProjectGeometryState[]>([]);
   const [currentIndex, setCurrentIndex] = useState<number>(-1);
   const [currentProject, setCurrentProject] = useState<ProjectRecord | null>(null);
   const projectIdRef = useRef<string | null>(null);
@@ -28,7 +44,7 @@ export function useProjectHistory(projectId?: string) {
           setCurrentIndex(-1);
         }
       } catch (error) {
-        console.error("خطأ أثناء تحميل المشروع من الداتا بيز المحلية:", error);
+        Logger.error('خطأ أثناء تحميل المشروع من قاعدة البيانات المحلية', 'useProjectHistory', error instanceof Error ? error : undefined);
       } finally {
         setIsLoading(false);
       }
@@ -36,16 +52,28 @@ export function useProjectHistory(projectId?: string) {
     loadProject();
   }, [projectId]);
 
-  // 2. تحديث الحالة وإضافة خطوة جديدة للتاريخ (تلقائي الحفظ في Dexie.js)
-  const updateGeometry = async (newGeometry: any, projectName?: string) => {
-    const updatedHistory = history.slice(0, currentIndex + 1);
-    
-    // حفظ التحديث في الذاكرة المؤقتة للـ Undo/Redo
-    setHistory([...updatedHistory, newGeometry]);
-    setCurrentIndex(updatedHistory.length);
+  // 2. تحديث الحالة وإضافة خطوة جديدة للتاريخ مع حد أقصى (MAX_HISTORY_SIZE) ودمج العمليات المتطابقة
+  const updateGeometry = useCallback(async (newGeometry: ProjectGeometryState, _projectName?: string) => {
+    setHistory(prev => {
+      const sliced = prev.slice(0, currentIndex + 1);
+      if (sliced.length > 0 && isSimilarGeometry(sliced[sliced.length - 1], newGeometry)) {
+        return sliced;
+      }
+      const next = [...sliced, newGeometry];
+      if (next.length > MAX_HISTORY_SIZE) {
+        return next.slice(next.length - MAX_HISTORY_SIZE);
+      }
+      return next;
+    });
 
-    // نحن لا نولد معرف عشوائي هنا لمنع تكرار البطاقات الوهمية
-    // مساحة العمل النشطة تحفظ دائماً في سجل موحد يحمل المعرف 'current_draft_workspace'
+    setCurrentIndex(prev => {
+      const currentLast = history[prev];
+      if (currentLast && isSimilarGeometry(currentLast, newGeometry)) {
+        return prev;
+      }
+      return Math.min(prev + 1, MAX_HISTORY_SIZE - 1);
+    });
+
     const targetName = 'مساحة_العمل_الحالية';
     const currentId = 'current_draft_workspace';
 
@@ -53,49 +81,54 @@ export function useProjectHistory(projectId?: string) {
       await StorageBridge.saveProjectToDB(targetName, newGeometry, currentId);
       setCurrentProject({ id: currentId, name: targetName, timestamp: Date.now(), geometryData: newGeometry });
     } catch (error) {
-      console.error("فشل الحفظ التلقائي في بيئة سطح المكتب:", error);
+      Logger.error('فشل الحفظ التلقائي في Dexie', 'useProjectHistory', error instanceof Error ? error : undefined);
     }
-  };
+  }, [currentIndex, history]);
 
-  // 3. عمليات التراجع والإعادة (Undo / Redo) فائدة السرعة
-  const undo = () => {
+  // 3. عمليات التراجع والإعادة (Undo / Redo)
+  const undo = useCallback(() => {
     if (currentIndex > 0) {
-      setCurrentIndex(currentIndex - 1);
-      return history[currentIndex - 1];
+      const nextIdx = currentIndex - 1;
+      setCurrentIndex(nextIdx);
+      return history[nextIdx];
     }
     return null;
-  };
+  }, [currentIndex, history]);
 
-  const redo = () => {
+  const redo = useCallback(() => {
     if (currentIndex < history.length - 1) {
-      setCurrentIndex(currentIndex + 1);
-      return history[currentIndex + 1];
+      const nextIdx = currentIndex + 1;
+      setCurrentIndex(nextIdx);
+      return history[nextIdx];
     }
     return null;
-  };
+  }, [currentIndex, history]);
 
-  // 4. تصدير ملفات التصنيع (G-Code أو STL أو STEP) عبر نظام Windows مباشرة
-  const exportManufacturingFile = async (fileContent: string | Uint8Array, extension: 'gcode' | 'stl' | 'py' | 'nc' | 'step' | 'stp', suggestedName?: string) => {
+  // 4. تصدير ملفات التصنيع مع إشعار المستخدم
+  const exportManufacturingFile = async (
+    fileContent: string | Uint8Array,
+    extension: 'gcode' | 'stl' | 'py' | 'nc' | 'step' | 'stp',
+    suggestedName?: string
+  ) => {
     const defaultName = suggestedName || `${currentProject?.name || 'MecaFlow_Output'}.${extension}`;
-    const isBinary = extension === 'stl';
-    
-    // استدعاء الويندوز دايلوج لحفظ الملف
+    const isBinary = extension === 'stl' && fileContent instanceof Uint8Array;
+
     const success = await StorageBridge.exportNativeFile(fileContent, defaultName, isBinary);
     if (success) {
-      console.log(`تم تصدير ملف ${extension.toUpperCase()} بنجاح إلى الجهاز.`);
+      NotificationService.success(`تم تصدير ملف ${extension.toUpperCase()} بنجاح (${defaultName})`);
     } else {
-      console.log("تم إلغاء عملية التصدير بواسطة المستخدم.");
+      NotificationService.info('تم إلغاء عملية التصدير.');
     }
   };
 
-  const saveAsNewProject = async (name: string, geometry: any) => {
+  const saveAsNewProject = async (name: string, geometry: ProjectGeometryState) => {
     try {
       const savedId = crypto.randomUUID();
       await StorageBridge.saveProjectToDB(name, geometry, savedId);
-      // لا نلوث مساحة العمل النشطة
       return savedId;
     } catch (e) {
-      console.error("فشل حفظ النموذج الجديد:", e);
+      Logger.error('فشل حفظ النموذج الجديد', 'useProjectHistory', e instanceof Error ? e : undefined);
+      NotificationService.error('تعذر حفظ النموذج في قاعدة البيانات المحلية');
       return null;
     }
   };
@@ -111,7 +144,7 @@ export function useProjectHistory(projectId?: string) {
         setCurrentIndex(0);
       }
     } catch (error) {
-      console.error("فشل تحميل المشروع:", error);
+      Logger.error('فشل تحميل المشروع', 'useProjectHistory', error instanceof Error ? error : undefined);
     } finally {
       setIsLoading(false);
     }
@@ -125,7 +158,7 @@ export function useProjectHistory(projectId?: string) {
   };
 
   return {
-    currentGeometry: history[currentIndex] || null,
+    currentGeometry: (history[currentIndex] as any) || null,
     updateGeometry,
     saveAsNewProject,
     loadProjectById,
@@ -136,6 +169,7 @@ export function useProjectHistory(projectId?: string) {
     exportManufacturingFile,
     canUndo: currentIndex > 0,
     canRedo: currentIndex < history.length - 1,
+    historySize: history.length,
     isLoading
   };
 }

@@ -18,9 +18,7 @@ export const createTubeGeometry = (config: TubeConfig): THREE.BufferGeometry => 
 
   const tt = config.thickness;
   const tr = config.shape === 'دائري' ? tw / 2 : config.cornerRadius;
-  // clearance is handled here or previously?
-  // previous code used config.thermalClearance - we should pass it or handle differently.
-  const clearance = 0; // default 0 if not passed 
+  const clearance = (config as TubeConfig & { thermalClearance?: boolean }).thermalClearance ? 0.1 : 0;
 
   const outerShape = new THREE.Shape();
   const tx = -tw / 2, ty = -th / 2;

@@ -11,117 +11,119 @@ export interface LogEntry {
   level: LogLevel;
   message: string;
   context?: string;
-  data?: any;
+  data?: Record<string, unknown> | unknown;
   stack?: string;
 }
 
+/**
+ * نظام التسجيل المركزي الموحد (Logger)
+ * يدعم مستويات السجل المتعددة، الاشتراك في الأحداث، وتصدير السجلات للتشخيص.
+ */
 export class Logger {
   private static logs: LogEntry[] = [];
   private static readonly MAX_LOGS = 1000;
   private static minLevel = LogLevel.DEBUG;
+  private static listeners: Array<(entry: LogEntry) => void> = [];
 
   /**
-   * تسجيل رسالة
+   * تسجيل رسالة في النظام المركزي
    */
   static log(
     level: LogLevel,
     message: string,
     context?: string,
-    data?: any
+    data?: Record<string, unknown> | unknown,
+    stack?: string
   ): void {
     const entry: LogEntry = {
       timestamp: new Date(),
       level,
       message,
       context,
-      data
+      data,
+      stack
     };
 
-    // إضافة إلى السجل
     this.logs.push(entry);
     if (this.logs.length > this.MAX_LOGS) {
       this.logs.shift();
     }
 
-    // طباعة في وحدة التحكم
     if (level >= this.minLevel) {
       this.printToConsole(entry);
     }
 
-    // إرسال الأخطاء الحرجة إلى خدمة monitoring
-    if (level === LogLevel.CRITICAL) {
-      this.reportCritical(entry);
-    }
+    this.listeners.forEach(listener => {
+      try {
+        listener(entry);
+      } catch {
+        // ignore listener failure
+      }
+    });
   }
 
-  static debug(message: string, context?: string, data?: any): void {
+  static debug(message: string, context?: string, data?: unknown): void {
     this.log(LogLevel.DEBUG, message, context, data);
   }
 
-  static info(message: string, context?: string, data?: any): void {
+  static info(message: string, context?: string, data?: unknown): void {
     this.log(LogLevel.INFO, message, context, data);
   }
 
-  static warn(message: string, context?: string, data?: any): void {
+  static warn(message: string, context?: string, data?: unknown): void {
     this.log(LogLevel.WARN, message, context, data);
   }
 
-  static error(message: string, context?: string, error?: Error): void {
-    this.log(LogLevel.ERROR, message, context, {
-      error: error?.message,
-      stack: error?.stack
-    });
+  static error(message: string, context?: string, error?: Error | Record<string, unknown>, stack?: string): void {
+    const isErr = error instanceof Error;
+    this.log(
+      LogLevel.ERROR,
+      message,
+      context,
+      isErr ? { error: error.message, stack: error.stack } : error,
+      stack || (isErr ? error.stack : undefined)
+    );
   }
 
-  static critical(message: string, context?: string, error?: Error): void {
-    this.log(LogLevel.CRITICAL, message, context, {
-      error: error?.message,
-      stack: error?.stack
-    });
-  }
-
-  /**
-   * طباعة في وحدة التحكم
-   */
-  private static printToConsole(entry: LogEntry): void {
-    const levelName = LogLevel[entry.level];
-    const time = entry.timestamp.toLocaleTimeString('ar-SA');
-    const prefix = `[${time}] [${levelName}]`;
-
-    const colors = {
-      [LogLevel.DEBUG]: '\x1b[36m',    // أزرق
-      [LogLevel.INFO]: '\x1b[32m',     // أخضر
-      [LogLevel.WARN]: '\x1b[33m',     // أصفر
-      [LogLevel.ERROR]: '\x1b[31m',    // أحمر
-      [LogLevel.CRITICAL]: '\x1b[41m'  // خلفية حمراء
-    };
-
-    const reset = '\x1b[0m';
-    const color = colors[entry.level];
-
-    console.log(
-      `${color}${prefix}${reset} ${entry.context ? `[${entry.context}]` : ''} ${entry.message}`,
-      entry.data || ''
+  static critical(message: string, context?: string, error?: Error | Record<string, unknown>, stack?: string): void {
+    const isErr = error instanceof Error;
+    this.log(
+      LogLevel.CRITICAL,
+      message,
+      context,
+      isErr ? { error: error.message, stack: error.stack } : error,
+      stack || (isErr ? error.stack : undefined)
     );
   }
 
   /**
-   * إرسال الأخطاء الحرجة
+   * الاشتراك في السجلات الفورية
    */
-  private static reportCritical(entry: LogEntry): void {
-    // يمكن إرسال الخطأ إلى خدمة مثل Sentry
-    if (typeof window !== 'undefined' && window.navigator.onLine) {
-      fetch('/api/logs/critical', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(entry)
-      }).catch(err => console.error('فشل في إرسال السجل:', err));
-    }
+  static subscribe(listener: (entry: LogEntry) => void): () => void {
+    this.listeners.push(listener);
+    return () => {
+      this.listeners = this.listeners.filter(l => l !== listener);
+    };
   }
 
   /**
-   * الحصول على السجلات
+   * طباعة منسقة في وحدة التحكم
    */
+  private static printToConsole(entry: LogEntry): void {
+    const levelName = LogLevel[entry.level];
+    const time = entry.timestamp.toISOString().slice(11, 19);
+    const prefix = `[${time}] [${levelName}]`;
+    const ctx = entry.context ? `[${entry.context}]` : '';
+
+    if (entry.level >= LogLevel.ERROR) {
+      console.error(`${prefix} ${ctx} ${entry.message}`, entry.data || '');
+    } else if (entry.level === LogLevel.WARN) {
+      console.warn(`${prefix} ${ctx} ${entry.message}`, entry.data || '');
+    } else {
+      console.log(`${prefix} ${ctx} ${entry.message}`, entry.data || '');
+    }
+  }
+
   static getLogs(level?: LogLevel): LogEntry[] {
     if (level !== undefined) {
       return this.logs.filter(log => log.level === level);
@@ -129,23 +131,14 @@ export class Logger {
     return [...this.logs];
   }
 
-  /**
-   * تصدير السجلات
-   */
   static exportLogs(): string {
     return JSON.stringify(this.logs, null, 2);
   }
 
-  /**
-   * مسح السجلات
-   */
   static clearLogs(): void {
     this.logs = [];
   }
 
-  /**
-   * تعيين الحد الأدنى للمستوى
-   */
   static setMinLevel(level: LogLevel): void {
     this.minLevel = level;
   }

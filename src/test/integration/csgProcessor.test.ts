@@ -18,6 +18,7 @@ describe('CSGProcessor Integration Tests', () => {
 
       const targetMesh = new THREE.Mesh(tubeGeometry);
       const toolMesh = new THREE.Mesh(panGeometry);
+      toolMesh.position.set(0, 0, 60);
 
       // إنشاء Brushes
       const targetBrush = processor.createBrush(targetMesh, tubeGeometry);

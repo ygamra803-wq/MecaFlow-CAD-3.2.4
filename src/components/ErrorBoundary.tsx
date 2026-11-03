@@ -4,11 +4,14 @@ import { Logger } from '../lib/logger';
 
 interface Props {
   children: ReactNode;
+  fallback?: ReactNode;
+  onError?: (error: Error, componentStack: string) => void;
 }
 
 interface State {
   hasError: boolean;
   error?: Error;
+  componentStack?: string;
 }
 
 export class ErrorBoundary extends React.Component<Props, State> {
@@ -22,24 +25,54 @@ export class ErrorBoundary extends React.Component<Props, State> {
   }
 
   componentDidCatch(error: Error, errorInfo: ErrorInfo) {
-    ErrorHandler.handle(error, 'ErrorBoundary: ' + errorInfo.componentStack);
-    Logger.critical('خطأ في React Component', 'ErrorBoundary', error);
-    console.error('Component Stack:', errorInfo.componentStack);
+    const stack = errorInfo.componentStack || '';
+    this.setState({ componentStack: stack });
+
+    ErrorHandler.handle(error, {
+      component: stack,
+      location: typeof window !== 'undefined' ? window.location.href : 'unknown'
+    });
+    Logger.critical('خطأ حرج في مكون React', 'ErrorBoundary', error, stack);
+
+    if (this.props.onError) {
+      this.props.onError(error, stack);
+    }
   }
+
+  private handleRetry = () => {
+    this.setState({ hasError: false, error: undefined, componentStack: undefined });
+  };
 
   render() {
     if (this.state.hasError) {
+      if (this.props.fallback) {
+        return this.props.fallback;
+      }
+
       return (
-        <div className="flex items-center justify-center h-screen bg-red-900/20" dir="rtl">
-          <div className="bg-red-900 p-8 rounded-lg text-white max-w-md shadow-2xl border border-red-700">
-            <h1 className="text-2xl font-bold mb-4">❌ حدث خطأ</h1>
-            <p className="mb-6">{this.state.error?.message}</p>
-            <button
-              onClick={() => window.location.reload()}
-              className="bg-red-600 hover:bg-red-700 px-6 py-2 rounded-lg font-semibold transition-colors"
-            >
-              إعادة تحميل الصفحة
-            </button>
+        <div className="flex items-center justify-center h-screen bg-zinc-950 p-4" dir="rtl">
+          <div className="bg-zinc-900 p-8 rounded-2xl text-white max-w-lg w-full shadow-2xl border border-red-500/40">
+            <h1 className="text-xl font-bold mb-3 text-red-400 flex items-center gap-2">
+              <span>⚠️</span>
+              <span>حدث خطأ غير متوقع في واجهة النظام</span>
+            </h1>
+            <p className="text-sm text-zinc-300 mb-4 leading-relaxed">
+              {this.state.error?.message || 'تعذر إكمال العملية الحالية.'}
+            </p>
+            <div className="flex gap-3 mt-6">
+              <button
+                onClick={this.handleRetry}
+                className="flex-1 bg-emerald-600 hover:bg-emerald-500 px-5 py-2.5 rounded-lg text-xs font-bold transition-colors cursor-pointer"
+              >
+                إعادة المحاولة (استعادة الجلسة)
+              </button>
+              <button
+                onClick={() => window.location.reload()}
+                className="flex-1 bg-zinc-800 hover:bg-zinc-700 border border-zinc-700 px-5 py-2.5 rounded-lg text-xs font-bold transition-colors cursor-pointer"
+              >
+                إعادة تحميل التطبيق
+              </button>
+            </div>
           </div>
         </div>
       );
@@ -48,3 +81,5 @@ export class ErrorBoundary extends React.Component<Props, State> {
     return this.props.children;
   }
 }
+
+export const EnhancedErrorBoundary = ErrorBoundary;

@@ -5,6 +5,7 @@ import { generateCadQueryScript } from '../../lib/exportUtils';
 import { generateGcode } from '../../lib/gcodeGenerator';
 import { generateProfessionalFileName } from '../../lib/fileNameGenerator';
 import { StepExportService } from '../../lib/stepExport';
+import { NotificationService } from '../../lib/notificationService';
 
 interface Steps67ControlsProps {
   config: ZeroGapState;
@@ -377,9 +378,9 @@ export const Steps67Controls: React.FC<Steps67ControlsProps> = ({
               onClick={() => {
                 try {
                   const r = generateGcode(config, wizardStep);
-                  if (r.error) { alert(r.error); return; }
+                  if (r.error) { NotificationService.error(r.error); return; }
                   exportManufacturingFile(r.gcode, 'nc', generateProfessionalFileName(config, 'nc'));
-                } catch (err) { alert('فشل: ' + (err instanceof Error ? err.message : '')); }
+                } catch (err) { NotificationService.error('فشل: ' + (err instanceof Error ? err.message : '')); }
               }}
               className="w-full py-2 bg-[var(--accent-blue)]/10 hover:bg-[var(--accent-blue)]/20 text-[var(--accent-blue)] font-bold text-[11px] uppercase tracking-widest rounded border border-[var(--accent-blue)]/30 transition-colors"
               title="يصدر G-code الأولي المبني على المسار التجريبي"
@@ -392,7 +393,7 @@ export const Steps67Controls: React.FC<Steps67ControlsProps> = ({
           <section className="grid grid-cols-1 gap-2">
             <button
               type="button"
-              onClick={() => { try { onExport(); } catch (err) { alert('فشل تصدير STL: ' + (err instanceof Error ? err.message : 'خطأ')); } }}
+              onClick={() => { try { onExport(); } catch (err) { NotificationService.error('فشل تصدير STL: ' + (err instanceof Error ? err.message : 'خطأ')); } }}
               className="w-full py-2 bg-[var(--accent)] hover:opacity-90 transition-opacity text-white font-bold text-[11px] uppercase tracking-widest rounded shadow-[0_0_15px_rgba(16,185,129,0.3)]"
             >
               تصدير 3D مباشر (STL)
@@ -418,7 +419,7 @@ export const Steps67Controls: React.FC<Steps67ControlsProps> = ({
                     service.terminate();
                   } catch (err: any) {
                     console.error('Export failed:', err);
-                    alert('فشل تصدير STEP: ' + (err.message || String(err)));
+                    NotificationService.error('فشل تصدير STEP: ' + (err.message || String(err)));
                   } finally {
                     setIsExporting(false);
                   }
@@ -437,7 +438,7 @@ export const Steps67Controls: React.FC<Steps67ControlsProps> = ({
                 try {
                   const s = generateCadQueryScript(config);
                   exportManufacturingFile(s, 'py', generateProfessionalFileName(config, 'py'));
-                } catch (err) { alert('فشل: ' + (err instanceof Error ? err.message : '')); }
+                } catch (err) { NotificationService.error('فشل: ' + (err instanceof Error ? err.message : '')); }
               }}
               className="w-full py-2 bg-slate-700 hover:bg-slate-600 transition-colors text-zinc-200 font-bold text-[11px] uppercase tracking-widest rounded border border-zinc-650"
               title="تنزيل سكربت بايثون CadQuery لإنشاء المجسم برمجياً"
@@ -450,9 +451,9 @@ export const Steps67Controls: React.FC<Steps67ControlsProps> = ({
               onClick={() => {
                 try {
                   const r = generateGcode(config, wizardStep);
-                  if (r.error) { alert(r.error); return; }
+                  if (r.error) { NotificationService.error(r.error); return; }
                   exportManufacturingFile(r.gcode, 'nc', generateProfessionalFileName(config, 'nc'));
-                } catch (err) { alert('فشل: ' + (err instanceof Error ? err.message : '')); }
+                } catch (err) { NotificationService.error('فشل: ' + (err instanceof Error ? err.message : '')); }
               }}
               className="w-full py-2 bg-green-600 hover:bg-green-500 transition-colors text-white font-bold text-[11px] uppercase tracking-widest rounded border border-green-500 shadow-[0_0_15px_rgba(34,197,94,0.3)]"
             >

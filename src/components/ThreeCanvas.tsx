@@ -349,6 +349,8 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
       exportMeshRef.current = null;
 
       try {
+        const intermediateGC: any[] = [];
+
         // ── 1. Tube — 3-Part Logic (Head / Body / Tail) ─────────────────────
         const tw = config.tube.width;
         const th = config.tube.shape === 'دائري' ? tw : config.tube.height;
@@ -366,10 +368,10 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
           : config.tube.totalLength;
 
         const activeTubeConfig = (wizardStep === 'technical-review' || wizardStep === 'final-inspect')
-          ? { ...config.tube, totalLength: tl }
+          ? { ...config.tube, totalLength: tl, thermalClearance: wizardStep === 'final-inspect' && !!config.thermalClearance }
           : config.tube;
 
-        let tubeGeom: THREE.BufferGeometry = geometryEngine.createTube(activeTubeConfig);
+        let tubeGeom: THREE.BufferGeometry = geometryEngine.createTube(activeTubeConfig as any);
 
         let bodyLength = tl - headLength - tailLength;
         if (bodyLength < 1) bodyLength = 1;
@@ -382,9 +384,16 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
 
         // ── 2. Handle ──────────────────────────────────────────────
         let handleGeom: THREE.BufferGeometry | null = null;
+        let handleCutGeom: THREE.BufferGeometry | null = null;
         let handleMeshObj: THREE.Mesh | null = null;
         if (needsHandle) {
           handleGeom = geometryEngine.createHandle(config.handle);
+          handleCutGeom = config.handle.solid
+            ? handleGeom
+            : geometryEngine.createHandle({ ...config.handle, solid: true });
+          if (handleCutGeom !== handleGeom) {
+            intermediateGC.push(handleCutGeom);
+          }
           const handleMatProps: any = { color: 0x22c55e, metalness: 0.6, roughness: 0.25 };
           
           if (wizardStep === 'handle-design') {
@@ -398,7 +407,6 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
           handleMeshObj.name = 'zerogap_handle_main';
         }
 
-        // ── 3. Pan ─────────────────────────────────�        // ── Render State and Brushes GC ─────────────────────────────────────
         // ── 3. Pan ──────────────────────────────────────────────────────────
         let panGeom: THREE.BufferGeometry | null = null;
         let panInnerGeom: THREE.BufferGeometry | null = null;
@@ -456,7 +464,6 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
 
         // ── Render State and Brushes GC ─────────────────────────────────────
         let finalResultMesh = tubeMesh;
-        const intermediateGC: any[] = [];
         
         const getBrush = (mesh: THREE.Object3D, geom: THREE.BufferGeometry) => {
              const brush = csgProcessor.createBrush(mesh, geom);
@@ -797,11 +804,11 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
               if (controlsRef.current && cameraRef.current && shouldRecenter) {
                 const bb = new THREE.Box3().setFromObject(panOuterWf);
                 const center = new THREE.Vector3(); bb.getCenter(center);
-                controlsRef.current.target.set(0, 0, 0);
+                controlsRef.current.target.copy(center);
                 const maxDim = Math.max(bb.max.x - bb.min.x, bb.max.y - bb.min.y, bb.max.z - bb.min.z) || 100;
                 const fov = cameraRef.current.fov * (Math.PI / 180);
                 const dist = Math.abs(maxDim / 2 / Math.tan(fov / 2)) * 1.5;
-                cameraRef.current.position.set(dist * 0.5, dist * 0.6, dist);
+                cameraRef.current.position.set(center.x + dist * 0.5, center.y + dist * 0.6, center.z + dist);
 
                 hasAutoCentered.current = true;
                 lastStlName.current = config.tube.customStlName;
@@ -860,7 +867,7 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
           pBoundZ = panGeom.boundingBox?.max.z || pBoundZ;
         }
 
-        const hInsertion = config.handle.insertionDepth || 0;
+        const hInsertion = config.handle.insertionDepth ?? 15;
         const isStep5 = wizardStep === 'tube-handle-cut' || wizardStep === 'technical-review' || wizardStep === 'final-inspect';
         const shouldShowPan = !(wizardStep === 'tube-handle-cut' && config.pan.hideInStep5);
 
@@ -923,6 +930,7 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
 
           let sharedR4GeomForToolpath: THREE.BufferGeometry | null = null;
           let sharedR5GeomBounds: THREE.Box3 | undefined = undefined;
+          const activeHandleCutGeom = handleCutGeom || handleGeom;
 
           if (effectiveRenderMode === 'preview') {
 
@@ -931,7 +939,8 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
                  tubeMesh.updateMatrixWorld(true);
                  panMesh.updateMatrixWorld(true);
                  const tBrush = getBrush(tubeMesh, tubeGeom);
-                 const pBrush = getBrush(panMesh, panGeom);
+                 const pG = config.pan.applyThicknessToCut && panInnerGeom ? panInnerGeom : panGeom;
+                 const pBrush = getBrush(panMesh, pG);
                  const cutTubeBrush = csgProcessor.subtract(tBrush, pBrush);
                  if (cutTubeBrush && cutTubeBrush.geometry && cutTubeBrush.geometry.attributes.position && cutTubeBrush.geometry.attributes.position.count > 0) {
                    tubeMesh.geometry = cutTubeBrush.geometry.clone();
@@ -954,9 +963,9 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
               setIsLoading(true);
               const tBrush = getBrush(tubeMesh, tubeGeom);
 
-              // Step 4 Pan Intermediate result
+              // Step 4 Pan Intermediate result (always applied in Step 4 and Step 5 boolean mode)
               let r4Geom: THREE.BufferGeometry = tubeGeom;
-              if (panGeom && panMesh && shouldShowPan) {
+              if (panGeom && panMesh) {
                  const pG = config.pan.applyThicknessToCut && panInnerGeom ? panInnerGeom : panGeom;
                  const pBrush = getBrush(panMesh, pG);
                  const r4Brush = csgProcessor.subtract(tBrush, pBrush);
@@ -969,11 +978,11 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
               }
               sharedR4GeomForToolpath = r4Geom;
 
-              // Step 5 Handle subtraction from Step 4 output
+              // Step 5 Handle subtraction from Step 4 output (using solid handleCutGeom so no internal plug remains)
               let r5Geom: THREE.BufferGeometry = r4Geom;
-              if (handleGeom && handleMeshObj && wizardStep === 'tube-handle-cut') {
+              if (activeHandleCutGeom && handleMeshObj && wizardStep === 'tube-handle-cut') {
                  const r4Brush_main = getBrush(tubeMesh, r4Geom);
-                 const hBrush = getBrush(handleMeshObj, handleGeom);
+                 const hBrush = getBrush(handleMeshObj, activeHandleCutGeom);
                  const r5Brush = csgProcessor.subtract(r4Brush_main, hBrush);
                  r5Geom = r5Brush.geometry;
 
@@ -1027,7 +1036,7 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
                  }
 
                  // Ghost Handle (amber) = R4_main - R5_main
-                 if (handleGeom && handleMeshObj && wizardStep === 'tube-handle-cut') {
+                 if (activeHandleCutGeom && handleMeshObj && wizardStep === 'tube-handle-cut') {
                     try {
                       const r4Brush_main = getBrush(tubeMesh, r4Geom);
                       const r5Brush_main = getBrush(tubeMesh, r5Geom);
@@ -1052,9 +1061,10 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
               const ev = new Evaluator();
               const tBrush = getBrush(tubeMesh, tubeGeom);
 
-              if (wizardStep === 'pan-tube-cut' && panGeom && panMesh && shouldShowPan) {
+              if ((wizardStep === 'pan-tube-cut' || (wizardStep === 'tube-handle-cut' && effectiveRenderMode === 'boolean')) && panGeom && panMesh && shouldShowPan) {
                 try {
-                  const outerBrush = getBrush(panMesh, panGeom);
+                  const pG = config.pan.applyThicknessToCut && panInnerGeom ? panInnerGeom : panGeom;
+                  const outerBrush = getBrush(panMesh, pG);
                   const contactForEdges = ev.evaluate(tBrush, outerBrush, INTERSECTION);
                   const edges = new THREE.EdgesGeometry(contactForEdges.geometry, 30);
                   const filteredEdges = filterCutPathEdges(edges, tl, config.tube.width, config.tube.height || config.tube.width, config.tube.shape === 'دائري', effectiveRenderMode === 'boolean' ? sharedR5GeomBounds : undefined);
@@ -1063,7 +1073,7 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
                     color: 0x3b82f6, linewidth: 2, depthTest: false, transparent: true, opacity: 0.9
                   }));
                   saddle.name = 'zerogap_pan_ring';
-                  saddle.renderOrder = 9999; // Overlay flawlessly
+                  saddle.renderOrder = 9999;
 
                   if (effectiveRenderMode === 'boolean') {
                      const centerOffset = finalResultMesh?.userData.centeredOffset;
@@ -1075,9 +1085,9 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
                 } catch(e) {}
               }
 
-              if (wizardStep === 'tube-handle-cut' && handleGeom && handleMeshObj) {
+              if (wizardStep === 'tube-handle-cut' && activeHandleCutGeom && handleMeshObj) {
                 try {
-                  const hBrush = getBrush(handleMeshObj, handleGeom);
+                  const hBrush = getBrush(handleMeshObj, activeHandleCutGeom);
                   let baseBrush = tBrush;
                   if (effectiveRenderMode === 'boolean' && sharedR4GeomForToolpath) {
                     baseBrush = getBrush(tubeMesh, sharedR4GeomForToolpath);
@@ -1091,7 +1101,7 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
                       color: 0xfbbf24, linewidth: 2, depthTest: false, transparent: true, opacity: 0.9
                     }));
                     saddle.name = 'zerogap_handle_ring';
-                    saddle.renderOrder = 9999; // Overlay flawlessly
+                    saddle.renderOrder = 9999;
 
                     if (effectiveRenderMode === 'boolean') {
                        const centerOffset = finalResultMesh?.userData.centeredOffset;
@@ -1118,86 +1128,90 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
           }
 
           setIsLoading(true);
+          const activeHandleCutGeom = handleCutGeom || handleGeom;
 
+          /**
+           * رسم مسارات الليزر والـ G-Code في المرحلة 7 متطابقة بنسبة 100% مع الإحداثيات المحلية للقطعة النهائية
+           */
           const drawCNCPath = (centerOffset: THREE.Vector3 | undefined) => {
             try {
               const { panPoints3D, handlePoints3D } = GCodeGenerator.generatePoints(config, wizardStep);
 
-              // We must transform points to local world space of final-inspect tube setup using deterministic Matrix4 logic.
-              const convertToWorld = (pts: THREE.Vector3[]) => {
-                const matrix = new THREE.Matrix4();
-                const hInsertion = config.handle.insertionDepth || 15;
-                const tubeZPos = (-tl + hInsertion / 2);
-                
-                const pivotMatrix = new THREE.Matrix4();
-                const angleRad = (config.assembly.tiltAngle || 0) * (Math.PI / 180);
-                const tubeRoll = (config.assembly.handleAngleY || 0) * (Math.PI / 180);
-                
-                const euler = new THREE.Euler(angleRad, 0, tubeRoll, 'XYZ');
-                pivotMatrix.makeRotationFromEuler(euler);
-                pivotMatrix.setPosition(0, 0, tubeZPos);
-                
-                const meshMatrix = new THREE.Matrix4();
-                meshMatrix.setPosition(0, 0, tl / 2);
-                
-                matrix.multiplyMatrices(pivotMatrix, meshMatrix);
-                return pts.map(p => p.clone().applyMatrix4(matrix));
-              };
+              const createGlowingLine = (rawPoints: THREE.Vector3[], color: number, name: string) => {
+                if (rawPoints.length < 2) return;
 
-              const panPointsWorld = convertToWorld(panPoints3D);
-              const handlePointsWorld = convertToWorld(handlePoints3D);
-              
-              const createGlowingLine = (points: THREE.Vector3[], color: number, name: string) => {
-                if (points.length < 2) return;
-                
-                const curve = new THREE.CatmullRomCurve3(points, false, 'catmullrom', 0.5);
-                const tubeGeometry = new THREE.TubeGeometry(curve, 300, 0.4, 8, false);
-                
-                const material = new THREE.MeshStandardMaterial({ 
-                  color, 
-                  emissive: color, 
-                  emissiveIntensity: 0.8,
+                // إزالة النقاط المتطابقة وتنعيم القفزات الحادة خطياً لمنع أي تشوه أو أشواك في المنحنى
+                const deduped: THREE.Vector3[] = [];
+                for (const pt of rawPoints) {
+                  if (deduped.length === 0 || deduped[deduped.length - 1].distanceTo(pt) > 0.05) {
+                    deduped.push(pt.clone());
+                  }
+                }
+                if (deduped.length > 1 && deduped[0].distanceTo(deduped[deduped.length - 1]) <= 0.05) {
+                  deduped.pop();
+                }
+                if (deduped.length < 3) return;
+
+                const subdivided: THREE.Vector3[] = [];
+                for (let i = 0; i < deduped.length; i++) {
+                  const p0 = deduped[i];
+                  const p1 = deduped[(i + 1) % deduped.length];
+                  subdivided.push(p0);
+                  const d = p0.distanceTo(p1);
+                  if (d > 1.0) {
+                    const steps = Math.min(20, Math.ceil(d / 0.5));
+                    for (let s = 1; s < steps; s++) {
+                      subdivided.push(p0.clone().lerp(p1, s / steps));
+                    }
+                  }
+                }
+
+                const curve = new THREE.CatmullRomCurve3(subdivided, true, 'centripetal', 0.1);
+                const tubeGeometry = new THREE.TubeGeometry(curve, Math.min(600, subdivided.length * 2), 0.32, 8, true);
+
+                const material = new THREE.MeshStandardMaterial({
+                  color,
+                  emissive: color,
+                  emissiveIntensity: 0.9,
                   roughness: 0.2,
                   metalness: 0.8,
                   depthTest: false,
                   transparent: true,
-                  opacity: 0.9
+                  opacity: 0.92
                 });
                 const pathMesh = new THREE.Mesh(tubeGeometry, material);
                 pathMesh.name = name;
                 pathMesh.renderOrder = 9999;
-                
-                const pointLight = new THREE.PointLight(color, 2, 50);
-                pointLight.position.copy(points[0]);
+
+                // خط مركزي حاد لتوضيح حد القطع بدقة هندسية
+                const coreGeom = new THREE.BufferGeometry().setFromPoints(subdivided);
+                const coreLine = new THREE.LineLoop(
+                  coreGeom,
+                  new THREE.LineBasicMaterial({ color: 0xffffff, depthTest: false, transparent: true, opacity: 0.85 })
+                );
+                coreLine.renderOrder = 10000;
+                pathMesh.add(coreLine);
+
+                const pointLight = new THREE.PointLight(color, 1.5, 45);
+                pointLight.position.copy(subdivided[0]);
                 pathMesh.add(pointLight);
-                
-                if (centerOffset) pathMesh.geometry.translate(-centerOffset.x, -centerOffset.y, -centerOffset.z);
+
+                if (centerOffset) {
+                  pathMesh.geometry.translate(-centerOffset.x, -centerOffset.y, -centerOffset.z);
+                  coreGeom.translate(-centerOffset.x, -centerOffset.y, -centerOffset.z);
+                  pointLight.position.sub(centerOffset);
+                }
                 scene.add(pathMesh);
               };
 
-              createGlowingLine(panPointsWorld, 0x00ffaa, 'zerogap_toolpath_pan');
-              createGlowingLine(handlePointsWorld, 0x00ffaa, 'zerogap_toolpath_handle');
+              createGlowingLine(panPoints3D, 0x00ffaa, 'zerogap_toolpath_pan');
+              createGlowingLine(handlePoints3D, 0x00ffaa, 'zerogap_toolpath_handle');
             } catch (e) {
               console.error("Failed to generate CNC toolpath preview", e);
             }
           };
 
-          if (wizardStep === 'final-inspect' && finalPartFromHandle) {
-            finalResultMesh = finalPartFromHandle.clone() as any;
-            finalResultMesh.name = 'zerogap_result';
-            centerObject(finalResultMesh);
-            scene.add(finalResultMesh);
-            exportMeshRef.current = finalResultMesh;
-
-            if (config.showGcodePath) {
-              drawCNCPath(finalResultMesh.userData.centeredOffset);
-            }
-
-            setIsLoading(false);
-            return true;
-          }
-
-          // Compute Boolean cut
+          // Compute Boolean cut freshly for Stages 6 & 7
           const tBrush = getBrush(tubeMesh, tubeGeom);
 
           // Step 4 Pan Intermediate result
@@ -1214,11 +1228,11 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
              }
           }
 
-          // Step 5 Handle subtraction from Step 4 output
+          // Step 5 Handle subtraction from Step 4 output (using solid handleCutGeom)
           let r5Geom: THREE.BufferGeometry = r4Geom;
-          if (handleGeom && handleMeshObj) {
+          if (activeHandleCutGeom && handleMeshObj) {
              const r4Brush_main = getBrush(tubeMesh, r4Geom);
-             const hBrush = getBrush(handleMeshObj, handleGeom);
+             const hBrush = getBrush(handleMeshObj, activeHandleCutGeom);
              const r5Brush = csgProcessor.subtract(r4Brush_main, hBrush);
              r5Geom = r5Brush.geometry;
 
@@ -1226,6 +1240,34 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
                 const split = splitConnectedComponents(r5Geom);
                 r5Geom = split.mainGeom;
              }
+          }
+
+          // Step 7 Laser Orientation Mark (التعليم المرجعي بالليزر على السطح العلوي للأنبوب)
+          let laserMarkLocalZ: number | null = null;
+          if (wizardStep === 'final-inspect' && config.markOrientation) {
+            try {
+              r5Geom.computeBoundingBox();
+              const bbBefore = r5Geom.boundingBox;
+              const markZ = bbBefore ? (bbBefore.min.z + bbBefore.max.z) * 0.5 : 0;
+              laserMarkLocalZ = markZ;
+
+              const markGeom = new THREE.CylinderGeometry(1.2, 1.2, th * 0.6, 24);
+              intermediateGC.push(markGeom);
+              const markMesh = new THREE.Mesh(markGeom);
+              markMesh.position.set(0, th / 2, markZ);
+              tubeMesh.add(markMesh);
+              tubeMesh.updateMatrixWorld(true);
+
+              const r5Brush_mark = getBrush(tubeMesh, r5Geom);
+              const markBrush = getBrush(markMesh, markGeom);
+              const markedBrush = csgProcessor.subtract(r5Brush_mark, markBrush);
+              if (markedBrush?.geometry?.attributes?.position?.count > 0) {
+                r5Geom = markedBrush.geometry;
+              }
+              tubeMesh.remove(markMesh);
+            } catch (e) {
+              console.warn('Laser orientation mark CSG skipped:', e);
+            }
           }
 
           if (!r5Geom.attributes.position || r5Geom.attributes.position.count === 0) {
@@ -1236,7 +1278,12 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
           r5Geom.computeBoundingBox();
           const mainGeomBounds = r5Geom.boundingBox ? r5Geom.boundingBox.clone() : undefined;
 
-          const resultMat = new THREE.MeshStandardMaterial({ color: 0xeeeeee, metalness: 0.8, roughness: 0.15, side: THREE.DoubleSide });
+          const resultMat = new THREE.MeshStandardMaterial({
+            color: 0xeeeeee,
+            metalness: 0.8,
+            roughness: wizardStep === 'final-inspect' && config.addFillet ? 0.1 : 0.15,
+            side: THREE.DoubleSide
+          });
           finalResultMesh = new THREE.Mesh(r5Geom, resultMat);
           finalResultMesh.name = 'zerogap_result';
 
@@ -1252,14 +1299,35 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
 
           const centerOffset = finalResultMesh?.userData?.centeredOffset;
 
+          // حلقة بصرية مضيئة لموضع التعليم المرجعي بالليزر (Laser Mark)
+          if (wizardStep === 'final-inspect' && config.markOrientation && laserMarkLocalZ !== null) {
+            const markRingPts: THREE.Vector3[] = [];
+            for (let a = 0; a <= 32; a++) {
+              const ang = (a / 32) * Math.PI * 2;
+              const pt = new THREE.Vector3(
+                1.6 * Math.cos(ang),
+                th / 2 + 0.15,
+                laserMarkLocalZ + 1.6 * Math.sin(ang)
+              );
+              if (centerOffset) pt.sub(centerOffset);
+              markRingPts.push(pt);
+            }
+            const markRingGeom = new THREE.BufferGeometry().setFromPoints(markRingPts);
+            const markRing = new THREE.LineLoop(
+              markRingGeom,
+              new THREE.LineBasicMaterial({ color: 0xf59e0b, depthTest: false, linewidth: 2 })
+            );
+            markRing.name = 'zerogap_laser_mark_ring';
+            markRing.renderOrder = 10000;
+            scene.add(markRing);
+          }
+
           // --- GHOST PIECES ---
           if (config.showGhostPart && wizardStep !== 'final-inspect' && effectiveRenderMode === 'boolean') {
              const tBrushGhost = getBrush(tubeMesh, tubeGeom);
 
              if (panGeom && panMesh) {
                 try {
-                  const pGeomToCut = config.pan.applyThicknessToCut && panInnerGeom ? panInnerGeom : panGeom;
-                  const pBrush = getBrush(panMesh, pGeomToCut);
                   const r4Brush_main = getBrush(tubeMesh, r4Geom);
                   const panWaste = csgProcessor.subtract(tBrushGhost, r4Brush_main);
                   if (panWaste.geometry.attributes.position && panWaste.geometry.attributes.position.count > 0) {
@@ -1274,9 +1342,8 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
                 } catch(e) {}
              }
 
-             if (handleGeom && handleMeshObj) {
+             if (activeHandleCutGeom && handleMeshObj) {
                 try {
-                  const hBrush = getBrush(handleMeshObj, handleGeom);
                   const r4Brush_main = getBrush(tubeMesh, r4Geom);
                   const r5Brush_main = getBrush(tubeMesh, r5Geom);
                   const handleWaste = csgProcessor.subtract(r4Brush_main, r5Brush_main);
@@ -1313,9 +1380,9 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
             } catch(e) {}
           }
 
-          if (handleGeom && handleMeshObj) {
+          if (activeHandleCutGeom && handleMeshObj) {
             try {
-              const hBrush = getBrush(handleMeshObj, handleGeom);
+              const hBrush = getBrush(handleMeshObj, activeHandleCutGeom);
               let baseBrush = tBrush;
               if (effectiveRenderMode === 'boolean') {
                  baseBrush = getBrush(tubeMesh, r4Geom); 
@@ -1331,17 +1398,21 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
           }
 
           // --- SADDLE CURVES & TECHNICAL LASER ---
-          if (config.showToolpathPreview && wizardStep !== 'final-inspect') {
+          if ((config.showToolpathPreview && wizardStep !== 'final-inspect') || (config.showGcodePath && wizardStep === 'final-inspect')) {
+             const saddleColorPan = wizardStep === 'final-inspect' ? 0x00ffaa : 0x3b82f6;
+             const saddleColorHandle = wizardStep === 'final-inspect' ? 0x00ffaa : 0xfbbf24;
+
              // Pan Cut saddle & laser
              if (panGeom && panMesh) {
                try {
-                 const outerBrush = getBrush(panMesh, panGeom);
+                 const pG = config.pan.applyThicknessToCut && panInnerGeom ? panInnerGeom : panGeom;
+                 const outerBrush = getBrush(panMesh, pG);
                  const contactForEdges = ev.evaluate(tBrush, outerBrush, INTERSECTION);
                  const edges = new THREE.EdgesGeometry(contactForEdges.geometry, 30);
                  const filteredEdges = filterCutPathEdges(edges, tl, config.tube.width, config.tube.height || config.tube.width, config.tube.shape === 'دائري', effectiveRenderMode === 'boolean' ? mainGeomBounds : undefined);
 
                  const saddle = new THREE.LineSegments(filteredEdges, new THREE.LineBasicMaterial({
-                   color: 0x3b82f6, linewidth: 2, depthTest: false, transparent: true, opacity: 0.9
+                   color: saddleColorPan, linewidth: 2, depthTest: false, transparent: true, opacity: 0.9
                  }));
                  saddle.name = 'zerogap_pan_ring';
                  saddle.renderOrder = 9999;
@@ -1352,9 +1423,9 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
              }
 
              // Handle Cut saddle & laser
-             if (handleGeom && handleMeshObj) {
+             if (activeHandleCutGeom && handleMeshObj) {
                try {
-                 const hBrush = getBrush(handleMeshObj, handleGeom);
+                 const hBrush = getBrush(handleMeshObj, activeHandleCutGeom);
                  let baseBrush = tBrush;
                  if (effectiveRenderMode === 'boolean') {
                     baseBrush = getBrush(tubeMesh, r4Geom);
@@ -1365,7 +1436,7 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
                    const filteredEdges = filterCutPathEdges(edges, tl, config.tube.width, config.tube.height || config.tube.width, config.tube.shape === 'دائري', effectiveRenderMode === 'boolean' ? mainGeomBounds : undefined);
 
                    const saddle = new THREE.LineSegments(filteredEdges, new THREE.LineBasicMaterial({
-                     color: 0xfbbf24, linewidth: 2, depthTest: false, transparent: true, opacity: 0.9
+                     color: saddleColorHandle, linewidth: 2, depthTest: false, transparent: true, opacity: 0.9
                    }));
                    saddle.name = 'zerogap_handle_ring';
                    saddle.renderOrder = 9999;
@@ -1484,10 +1555,12 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
               bb.getCenter(worldCenter);
 
               let focusTarget = worldCenter.clone();
-              if (wizardStep === 'pan-tube-cut' && panMesh) {
-                panMesh.getWorldPosition(focusTarget);
-              } else if (wizardStep === 'tube-handle-cut' && handleMeshObj) {
-                handleMeshObj.getWorldPosition(focusTarget);
+              if (effectiveRenderMode === 'preview') {
+                if (wizardStep === 'pan-tube-cut' && panMesh) {
+                  panMesh.getWorldPosition(focusTarget);
+                } else if (wizardStep === 'tube-handle-cut' && handleMeshObj) {
+                  handleMeshObj.getWorldPosition(focusTarget);
+                }
               }
 
               controlsRef.current.target.copy(focusTarget);

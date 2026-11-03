@@ -1,6 +1,6 @@
 {
   "name": "MecaFlow CAD-V2.3.1",
-  "description": "",
+  "description": "نظام تصميم هندسي ثلاثي الأبعاد متخصص في تقاطعات الأنابيب والمقالي والمقابض بدقة Zero-Gap مع محاكاة القطع بالليزر وتصدير ملفات التصنيع STEP و STL و G-Code.",
   "requestFramePermissions": [
     "camera",
     "microphone"

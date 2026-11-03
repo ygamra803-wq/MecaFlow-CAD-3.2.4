@@ -149,3 +149,17 @@ export interface CADState {
   jumpBackToStep?: WizardStep | null;
   pendingCustomSelection?: 'tube' | 'pan' | 'handle' | null;
 }
+
+export interface DimensionResult {
+  l: number;
+  w: number;
+  h: number;
+  length?: number;
+  width?: number;
+  height?: number;
+  volume?: number;
+  surfaceArea?: number;
+}
+
+export type ProjectGeometryState = CADState | ZeroGapState;
+

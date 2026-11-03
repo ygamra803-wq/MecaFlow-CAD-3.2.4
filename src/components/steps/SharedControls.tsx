@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 
 interface PrecisionControlProps {
   label: string;
@@ -9,6 +9,9 @@ interface PrecisionControlProps {
   step: number;
 }
 
+/**
+ * أداة تحكم رقمية دقيقة مع Debounce مدمج (120ms) لمنع تجميد واجهة WebGL أثناء السحب السريع
+ */
 export const PrecisionControl: React.FC<PrecisionControlProps> = ({
   label,
   val,
@@ -17,10 +20,39 @@ export const PrecisionControl: React.FC<PrecisionControlProps> = ({
   max,
   step
 }) => {
-  const handleUpdate = (newVal: number) => {
-    let bounded = Math.max(min, Math.min(max, newVal));
-    const decimals = step < 1 ? 1 : 0;
-    onChange(parseFloat(bounded.toFixed(decimals)));
+  const [localVal, setLocalVal] = useState<number>(val);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    setLocalVal(val);
+  }, [val]);
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, []);
+
+  const normalizeValue = (newVal: number): number => {
+    const bounded = Math.max(min, Math.min(max, newVal));
+    const decimals = step < 1 ? 2 : 0;
+    return parseFloat(bounded.toFixed(decimals));
+  };
+
+  const handleImmediateUpdate = (newVal: number) => {
+    const normalized = normalizeValue(newVal);
+    setLocalVal(normalized);
+    if (timerRef.current) clearTimeout(timerRef.current);
+    onChange(normalized);
+  };
+
+  const handleDebouncedUpdate = (newVal: number) => {
+    const normalized = normalizeValue(newVal);
+    setLocalVal(normalized);
+    if (timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => {
+      onChange(normalized);
+    }, 120);
   };
 
   return (
@@ -31,7 +63,7 @@ export const PrecisionControl: React.FC<PrecisionControlProps> = ({
       <div className="flex items-center gap-2">
         <button
           type="button"
-          onClick={() => handleUpdate(val - step)}
+          onClick={() => handleImmediateUpdate(localVal - step)}
           className="w-8 h-8 flex items-center justify-center bg-black/40 border border-[var(--border)] rounded text-[var(--accent)] hover:border-[var(--accent)] transition-colors"
         >
           -
@@ -42,14 +74,14 @@ export const PrecisionControl: React.FC<PrecisionControlProps> = ({
             min={min}
             max={max}
             step={step}
-            value={val}
-            onChange={(e) => handleUpdate(parseFloat(e.target.value) || 0)}
+            value={localVal}
+            onChange={(e) => handleDebouncedUpdate(parseFloat(e.target.value) || 0)}
             className="w-full bg-black/40 border border-[var(--border)] rounded h-8 text-center text-[12px] font-mono text-white focus:outline-none focus:border-[var(--accent)] transition-colors appearance-none"
           />
         </div>
         <button
           type="button"
-          onClick={() => handleUpdate(val + step)}
+          onClick={() => handleImmediateUpdate(localVal + step)}
           className="w-8 h-8 flex items-center justify-center bg-black/40 border border-[var(--border)] rounded text-[var(--accent)] hover:border-[var(--accent)] transition-colors"
         >
           +
@@ -60,8 +92,8 @@ export const PrecisionControl: React.FC<PrecisionControlProps> = ({
         min={min}
         max={max}
         step={step}
-        value={val}
-        onChange={(e) => handleUpdate(parseFloat(e.target.value) || 0)}
+        value={localVal}
+        onChange={(e) => handleDebouncedUpdate(parseFloat(e.target.value) || 0)}
         className="w-full h-1 mt-1 bg-[var(--border)] rounded-lg appearance-none cursor-pointer accent-[var(--accent)]"
       />
     </div>

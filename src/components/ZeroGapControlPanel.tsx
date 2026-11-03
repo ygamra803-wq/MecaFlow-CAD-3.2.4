@@ -9,6 +9,8 @@ import { ProfileDetails } from './ProfileDetails';
 import { StorageBridge } from '../lib/storageBridge';
 import { ParameterValidator } from '../lib/validators/parameterValidator';
 import { CloudBackupService } from '../lib/cloudBackup';
+import { NotificationService } from '../lib/notificationService';
+import { InputSanitizer } from '../lib/security';
 import { Eye, FolderOpen, ArrowRight, Search, Sliders, ChevronLeft } from 'lucide-react';
 import { TubeIcon, PanIcon, HandleIcon } from './DashboardView';
 import { Steps123Controls } from './steps/Steps123Controls';
@@ -131,8 +133,9 @@ const ZeroGapControlPanel: React.FC<ControlPanelProps> = ({
       a.click();
       document.body.removeChild(a);
       URL.revokeObjectURL(url);
+      NotificationService.success(`تم تصدير نماذج (${typeLabel}) بنجاح`);
     } catch (e) {
-      alert('فشل تصدير النماذج: ' + (e instanceof Error ? e.message : 'خطأ غير معروف'));
+      NotificationService.error('فشل تصدير النماذج: ' + (e instanceof Error ? e.message : 'خطأ غير معروف'));
     }
   };
 
@@ -150,20 +153,21 @@ const ZeroGapControlPanel: React.FC<ControlPanelProps> = ({
         let addedCount = 0;
         importedArray.forEach((item: any) => {
           if (item && item.name && item.type && item.data) {
-            // التحقق والترميم السليم للنماذج
+            const safeName = InputSanitizer.sanitizeString(String(item.name));
+            const safeData = InputSanitizer.sanitizeObject(item.data);
             addProfile(
-              item.name + ' (مستورد)',
+              safeName + ' (مستورد)',
               item.type,
-              item.data
+              safeData
             );
             addedCount++;
           }
         });
 
-        alert(`نجح استيراد ${addedCount} من النماذج الهندسية بسلام.`);
+        NotificationService.success(`نجح استيراد ${addedCount} من النماذج الهندسية بسلام.`);
         if (refreshProfiles) refreshProfiles();
       } catch (err) {
-        alert('فشل قراءة ملف النماذج، تأكد من صحة تنسيق JSON: ' + (err instanceof Error ? err.message : 'خطأ غير معروف'));
+        NotificationService.error('فشل قراءة ملف النماذج، تأكد من صحة تنسيق JSON: ' + (err instanceof Error ? err.message : 'خطأ غير معروف'));
       }
     };
     reader.readAsText(file);
@@ -540,15 +544,21 @@ const ZeroGapControlPanel: React.FC<ControlPanelProps> = ({
           })()}
         </div>
         <div className="flex gap-1">
-          <button onClick={onUndo} title="تراجع" className="p-1 text-[var(--text-dim)] hover:text-white">↺</button>
-          <button onClick={onRedo} title="إعادة" className="p-1 text-[var(--text-dim)] hover:text-white">↻</button>
+          <button onClick={onUndo} title="تراجع (Ctrl+Z)" className="p-1 text-[var(--text-dim)] hover:text-white">↺</button>
+          <button onClick={onRedo} title="إعادة (Ctrl+Y)" className="p-1 text-[var(--text-dim)] hover:text-white">↻</button>
           <label className="cursor-pointer ml-2 px-2 py-1 bg-black/40 border border-[var(--border)] rounded text-[9px] text-[var(--text-main)] hover:border-[var(--accent-blue)] transition-colors">
             تحميل
             <input type="file" accept=".json" className="hidden" onChange={(e) => {
               if (e.target.files && e.target.files[0]) {
                 const r = new FileReader();
                 r.onload = ev => {
-                  try { onUpdate(JSON.parse(ev.target?.result as string)); } catch { alert('ملف غير صالح'); }
+                  try {
+                    const parsed = JSON.parse(ev.target?.result as string);
+                    onUpdate(InputSanitizer.sanitizeObject(parsed) as unknown as ZeroGapState);
+                    NotificationService.success('تم تحميل إعدادات التصميم بنجاح');
+                  } catch {
+                    NotificationService.error('ملف JSON غير صالح');
+                  }
                 };
                 r.readAsText(e.target.files[0]);
               }
@@ -557,7 +567,8 @@ const ZeroGapControlPanel: React.FC<ControlPanelProps> = ({
             <button
             onClick={async () => {
               const data = JSON.stringify(config, null, 2);
-              await StorageBridge.exportNativeFile(data, 'mecaflow_config.json');
+              const ok = await StorageBridge.exportNativeFile(data, 'mecaflow_config.json');
+              if (ok) NotificationService.success('تم حفظ ملف الإعدادات mecaflow_config.json');
             }}
             className="px-2 py-1 bg-black/40 border border-[var(--border)] rounded text-[9px] text-[var(--accent)] hover:border-[var(--accent)] transition-colors mr-1"
           >حفظ</button>
@@ -573,7 +584,11 @@ const ZeroGapControlPanel: React.FC<ControlPanelProps> = ({
                 wizardStep: wizardStep
               };
               const backupRes = await CloudBackupService.backupProject(dummyState);
-              alert(backupRes.message);
+              if (backupRes.success) {
+                NotificationService.success(backupRes.message);
+              } else {
+                NotificationService.warning(backupRes.message);
+              }
             }}
             className="px-2 py-1 bg-black/40 border border-[var(--border)] rounded text-[9px] text-blue-400 hover:border-blue-400 hover:text-white transition-colors"
             title="تأمين نسخة احتياطية محلية وسحابية فورية للرسومات"

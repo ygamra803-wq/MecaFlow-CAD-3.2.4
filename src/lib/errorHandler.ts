@@ -1,9 +1,26 @@
+import { Logger } from './logger';
+import { errorLogger, ErrorSeverity } from './errorLogger';
+import { NotificationService } from './notificationService';
+
+export type ErrorCode =
+  | 'UNKNOWN_ERROR'
+  | 'VALIDATION_ERROR'
+  | 'CSG_OPERATION_FAILED'
+  | 'INVALID_MESH'
+  | 'NO_GEOMETRY'
+  | 'UNSUPPORTED_FORMAT'
+  | 'EXPORT_FAILED'
+  | 'RATE_LIMITED'
+  | 'WEBGL_ERROR'
+  | 'STORAGE_ERROR'
+  | string;
+
 export class AppError extends Error {
   constructor(
-    public code: string,
+    public code: ErrorCode,
     public message: string,
     public severity: 'error' | 'warning' | 'info' = 'error',
-    public details?: Record<string, any>,
+    public details?: Record<string, unknown>,
     public timestamp: Date = new Date()
   ) {
     super(message);
@@ -17,29 +34,29 @@ export class AppError extends Error {
 }
 
 /**
- * معالج الأخطاء الموحد
+ * معالج الأخطاء المركزي الموحد (ErrorHandler)
+ * يدمج AppError + ErrorLogger + Logger + NotificationService في نظام متكامل.
  */
 export class ErrorHandler {
   private static listeners: Array<(error: AppError) => void> = [];
   private static errorLog: AppError[] = [];
   private static readonly MAX_LOG_SIZE = 100;
 
-  /**
-   * الاشتراك في أحداث الأخطاء
-   */
   static subscribe(listener: (error: AppError) => void): () => void {
     this.listeners.push(listener);
-    // إرجاع دالة للإلغاء
     return () => {
       this.listeners = this.listeners.filter(l => l !== listener);
     };
   }
 
-  /**
-   * معالجة الخطأ
-   */
-  static handle(error: unknown, context?: string): AppError {
+  static handle(
+    error: unknown,
+    context?: string | Record<string, unknown>,
+    notifyUser: boolean = false
+  ): AppError {
     let appError: AppError;
+    const contextObj = typeof context === 'string' ? { context } : (context || {});
+    const contextStr = typeof context === 'string' ? context : JSON.stringify(context || '');
 
     if (error instanceof AppError) {
       appError = error;
@@ -50,7 +67,7 @@ export class ErrorHandler {
         'error',
         {
           stack: error.stack,
-          context
+          ...contextObj
         }
       );
     } else if (typeof error === 'string') {
@@ -58,130 +75,114 @@ export class ErrorHandler {
         'UNKNOWN_ERROR',
         error,
         'error',
-        { context }
+        contextObj
       );
     } else {
       appError = new AppError(
         'UNKNOWN_ERROR',
         'حدث خطأ غير متوقع',
         'error',
-        { context, originalError: error }
+        { ...contextObj, originalError: error }
       );
     }
 
-    // تسجيل الخطأ
-    this.logError(appError);
-
-    // إخطار المستمعين
+    this.logError(appError, contextStr);
     this.notifyListeners(appError);
 
-    // إرسال إلى خدمة logging (اختياري)
-    if (appError.severity === 'error') {
-      this.logToService(appError);
+    if (notifyUser) {
+      if (appError.severity === 'error') {
+        NotificationService.error(appError.message);
+      } else if (appError.severity === 'warning') {
+        NotificationService.warning(appError.message);
+      } else {
+        NotificationService.info(appError.message);
+      }
     }
 
     return appError;
   }
 
-  /**
-   * تسجيل الخطأ محليًا
-   */
-  private static logError(error: AppError): void {
+  private static logError(error: AppError, contextStr?: string): void {
     this.errorLog.push(error);
 
-    // الحفاظ على حجم السجل
     if (this.errorLog.length > this.MAX_LOG_SIZE) {
       this.errorLog.shift();
     }
 
-    // طباعة في وحدة التحكم
-    const icon = error.severity === 'error' ? '❌' : error.severity === 'warning' ? '⚠️' : 'ℹ️';
-    console.log(
-      `${icon} [${error.code}] ${error.message}`,
-      error.details || ''
+    // تكامل مباشر مع ErrorLogger و Logger المركزي
+    const mappedSeverity =
+      error.severity === 'error'
+        ? ErrorSeverity.HIGH
+        : error.severity === 'warning'
+          ? ErrorSeverity.MEDIUM
+          : ErrorSeverity.LOW;
+
+    errorLogger.logError(
+      `[${error.code}] ${error.message}`,
+      mappedSeverity,
+      error.details,
+      typeof error.details?.stack === 'string' ? error.details.stack : error.stack
     );
+
+    if (error.severity === 'error') {
+      Logger.error(`[${error.code}] ${error.message}`, contextStr, error);
+    } else if (error.severity === 'warning') {
+      Logger.warn(`[${error.code}] ${error.message}`, contextStr, error.details);
+    } else {
+      Logger.info(`[${error.code}] ${error.message}`, contextStr, error.details);
+    }
   }
 
-  /**
-   * إخطار المستمعين
-   */
   private static notifyListeners(error: AppError): void {
     this.listeners.forEach(listener => {
       try {
         listener(error);
       } catch (err) {
-        console.error('خطأ في معالج الخطأ:', err);
+        console.error('خطأ في مستمع الأخطاء:', err);
       }
     });
   }
 
-  /**
-   * إرسال الخطأ إلى خدمة logging
-   */
-  private static logToService(error: AppError): void {
-    // يمكن إرسال الخطأ إلى خادم logging مثل Sentry
-  }
-
-  /**
-   * الحصول على سجل الأخطاء
-   */
   static getErrorLog(): AppError[] {
     return [...this.errorLog];
   }
 
-  /**
-   * مسح سجل الأخطاء
-   */
   static clearErrorLog(): void {
     this.errorLog = [];
+    errorLogger.clearLogs();
   }
 
-  /**
-   * الحصول على آخر خطأ
-   */
   static getLastError(): AppError | null {
     return this.errorLog.length > 0 ? this.errorLog[this.errorLog.length - 1] : null;
   }
 
-  /**
-   * الحصول على عدد الأخطاء
-   */
   static getErrorCount(): number {
     return this.errorLog.length;
   }
 }
 
-/**
- * دالة مساعدة لإنشاء AppError
- */
 export function createError(
-  code: string,
+  code: ErrorCode,
   message: string,
   severity: 'error' | 'warning' | 'info' = 'error',
-  details?: Record<string, any>
+  details?: Record<string, unknown>
 ): AppError {
   return new AppError(code, message, severity, details);
 }
 
-/**
- * دالة مساعدة لرمي خطأ مع معالجة
- */
 export function throwError(
-  code: string,
+  code: ErrorCode,
   message: string,
-  details?: Record<string, any>
+  details?: Record<string, unknown>
 ): never {
   const error = new AppError(code, message, 'error', details);
   ErrorHandler.handle(error);
   throw error;
 }
 
-/**
- * المتوافقية الكاملة للتطبيق
- */
 export const errorHandler = {
-  handle: (error: unknown, context?: string): string => {
-    return ErrorHandler.handle(error, context).message;
+  handle: (error: unknown, context?: string, notifyUser: boolean = false): string => {
+    return ErrorHandler.handle(error, context, notifyUser).message;
   },
   subscribe: (listener: (error: AppError) => void) => ErrorHandler.subscribe(listener)
 };

@@ -1,6 +1,7 @@
 import React, { useMemo } from 'react';
 import { ZeroGapState } from '../types';
 import { GCodeGenerator } from '../lib/gcodeGenerator';
+import { NotificationService } from '../lib/notificationService';
 
 interface CNCViewProps {
   config: ZeroGapState;
@@ -28,7 +29,7 @@ const CNCView: React.FC<CNCViewProps> = ({ config, exportManufacturingFile }) =>
 
   const handleExport = () => {
     if (hasError) {
-      alert(errorMsg);
+      NotificationService.error(errorMsg);
       return;
     }
     exportManufacturingFile(gcodeResult2.gcode, 'nc');

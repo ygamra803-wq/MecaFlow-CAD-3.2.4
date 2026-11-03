@@ -24,12 +24,15 @@ export default defineConfig(({mode}) => {
       format: 'es',
     },
     build: {
+      sourcemap: true,
+      minify: 'esbuild',
+      target: 'es2022',
       rollupOptions: {
         output: {
           manualChunks(id: string) {
-            if (id.includes('node_modules/three/')) return 'three';
-            if (id.includes('three-bvh-csg') || id.includes('three-mesh-bvh')) return 'three-csg';
-            if (id.includes('three-stdlib')) return 'three-stdlib';
+            if (id.includes('node_modules/three/') || id.includes('three-stdlib')) return 'three';
+            if (id.includes('three-bvh-csg') || id.includes('three-mesh-bvh') || id.includes('three-csg-ts')) return 'csg';
+            if (id.includes('node_modules/react/') || id.includes('node_modules/react-dom/')) return 'react';
           },
         },
       },

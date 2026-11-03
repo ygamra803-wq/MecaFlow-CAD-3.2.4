@@ -12,6 +12,11 @@ import { StorageBridge } from './lib/storageBridge';
 import { useProjectHistory } from './hooks/useProjectHistory';
 import { useProfiles } from './hooks/useProfiles';
 import { Eye } from 'lucide-react';
+import { HotkeyService } from './lib/hotkeyService';
+import { HealthMonitor } from './lib/healthMonitor';
+import { globalThemeManager } from './lib/themeManager';
+import { InputSanitizer } from './lib/security';
+import { NotificationService } from './lib/notificationService';
 
 import { PreviousWorkLibrary } from './components/PreviousWorkLibrary';
 
@@ -234,6 +239,36 @@ function MainApp() {
   const [previewBackupConfig, setPreviewBackupConfig] = useState<any>(null);
   const [previewBackupName, setPreviewBackupName] = useState<string | null>(null);
   const [customSelectionBackup, setCustomSelectionBackup] = useState<{ category: 'tube' | 'pan' | 'handle'; config: any; name: string | null } | null>(null);
+  const [activeThemeId, setActiveThemeId] = useState<string>(globalThemeManager.getCurrentTheme().id);
+
+  // تفعيل نظام المراقبة الصحية واختصارات لوحة المفاتيح (Hotkeys)
+  useEffect(() => {
+    HealthMonitor.startMonitoring(60000);
+    const cleanupListener = HotkeyService.setupGlobalListener();
+
+    const unsubUndo = HotkeyService.registerHotkey('Ctrl+Z', () => {
+      undo();
+      NotificationService.info('تم التراجع (Ctrl+Z)', 1800);
+    });
+    const unsubRedo = HotkeyService.registerHotkey('Ctrl+Y', () => {
+      redo();
+      NotificationService.info('تمت الإعادة (Ctrl+Y)', 1800);
+    });
+    const unsubSave = HotkeyService.registerHotkey('Ctrl+S', () => {
+      if (!isDashboard) {
+        setSaveName('نموذج_' + new Date().toISOString().slice(0, 10));
+        setShowSaveDialog(true);
+      }
+    });
+
+    return () => {
+      unsubUndo();
+      unsubRedo();
+      unsubSave();
+      cleanupListener();
+      HealthMonitor.stopMonitoring();
+    };
+  }, [undo, redo, isDashboard]);
 
   const currentStepIdx = WIZARD_STEPS.indexOf(state.wizardStep);
   const canGoNext = isPreviousWorkMode 
@@ -352,8 +387,24 @@ function MainApp() {
               )}
             </div>
 
-            <div className="flex gap-3 items-center">
-              <div className="px-3 py-1 bg-zinc-800 rounded text-[10px] border border-zinc-700 font-mono text-zinc-400">v2.3</div>
+            <div className="flex gap-2 items-center">
+              <button
+                type="button"
+                onClick={() => {
+                  const nextTheme = activeThemeId === 'arabic' ? 'dark' : activeThemeId === 'dark' ? 'light' : 'arabic';
+                  globalThemeManager.setTheme(nextTheme);
+                  setActiveThemeId(nextTheme);
+                  NotificationService.info(`تم تفعيل السمة: ${globalThemeManager.getCurrentTheme().name}`, 2000);
+                }}
+                className="px-2.5 py-1 bg-zinc-800/80 hover:bg-zinc-700 rounded text-[10px] border border-zinc-700 font-sans text-zinc-300 transition-colors cursor-pointer"
+                title="تغيير السمة اللونية (Theme)"
+              >
+                🎨 السمة
+              </button>
+              <div className="hidden md:flex px-2.5 py-1 bg-zinc-900 rounded text-[10px] border border-zinc-800 font-mono text-zinc-500" title="اختصارات لوحة المفاتيح: Ctrl+Z تراجع | Ctrl+Y إعادة | Ctrl+S حفظ">
+                Ctrl+Z / Ctrl+S
+              </div>
+              <div className="px-3 py-1 bg-zinc-800 rounded text-[10px] border border-zinc-700 font-mono text-zinc-400">v2.3.1</div>
             </div>
           </header>
         )}
@@ -551,10 +602,12 @@ function MainApp() {
                     <div className="flex gap-3">
                       <button
                         onClick={() => {
-                          if (saveName) {
-                            saveAsNewProject(saveName, state.zeroGap).then(() => {
+                          const cleanName = InputSanitizer.sanitizeString(saveName);
+                          if (cleanName) {
+                            saveAsNewProject(cleanName, state.zeroGap).then(() => {
                               setShowSaveDialog(false);
                               setSaveSuccessMessage(true);
+                              NotificationService.success(`تم حفظ النموذج "${cleanName}" بنجاح`);
                               setTimeout(() => setSaveSuccessMessage(false), 3000);
                             });
                           }

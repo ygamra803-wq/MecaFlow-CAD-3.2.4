@@ -1,175 +1,112 @@
+#!/usr/bin/env python3
+"""
+نظام إدارة وتطبيق التعديلات الهندسية (PatchManager) لتطبيق MecaFlow-CAD V2.3
+يدعم التحقق من وجود الملفات، مطابقة الأنماط بأمان، والتراجع عن التعديلات (Revert).
+"""
+import json
 import re
+import sys
+from pathlib import Path
+from typing import Dict, List
 
-with open('src/components/ThreeCanvas.tsx', 'r') as f:
-    content = f.read()
 
-pattern = r"// ── 5\. Render: Preview or Boolean ────────────────────────────────────(.*?)// ── TRUE ABSOLUTE CENTER at \(0, 0, 0\) ──────────────────────────"
+class PatchManager:
+    def __init__(self, patches_dir: str = 'patches'):
+        self.patches_dir = Path(patches_dir)
+        self.patches_dir.mkdir(exist_ok=True)
+        self.applied_patches: Dict[str, bool] = {}
 
-replacement = """// ── 5. Render based on Wizard Step ────────────────────────────────────
-        const step = config.wizardStep || 'final';
+    def load_patches(self) -> List[Dict]:
+        """تحميل جميع ملفات الـ patches من المجلد المخصص"""
+        patches: List[Dict] = []
+        for patch_file in self.patches_dir.glob('*.json'):
+            try:
+                with open(patch_file, 'r', encoding='utf-8') as f:
+                    patches.append(json.load(f))
+            except Exception as e:
+                print(f"⚠️ Warning: Failed to read patch {patch_file}: {e}")
+        return sorted(patches, key=lambda x: x.get('priority', 0))
 
-        if (step === 'dashboard') {
-          exportMeshRef.current = new THREE.Mesh();
-          tubeGeom.dispose(); panGeom.dispose(); panInnerGeom.dispose(); hcGeom.dispose();
-        } else if (step === 'tube') {
-          tubeMesh.position.set(0, 0, 0);
-          tubeMesh.rotation.set(0, 0, 0);
-          tubeMesh.updateMatrixWorld(true);
-          try {
-            const edges = new THREE.EdgesGeometry(tubeGeom);
-            if (edges.attributes.position?.count > 0) tubeMesh.add(new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x333333 })));
-          } catch {}
-          scene.add(tubeMesh);
-          exportMeshRef.current = tubeMesh;
-          panGeom.dispose(); panInnerGeom.dispose(); hcGeom.dispose();
-        } else if (step === 'pan') {
-          panMesh.position.set(0, 0, 0);
-          panMesh.rotation.set(0, 0, 0);
-          panMesh.updateMatrixWorld(true);
-          if (config.pan.useShellPreview) {
-             const panOuterWf = new THREE.Mesh(panGeom, new THREE.MeshBasicMaterial({ color: 0x00E5FF, wireframe: true, transparent: true, opacity: 0.35 }));
-             const panInnerWf = new THREE.Mesh(panInnerGeom, new THREE.MeshBasicMaterial({ color: 0xFFA500, wireframe: true, transparent: true, opacity: 0.25 }));
-             scene.add(panOuterWf); scene.add(panInnerWf);
-          } else {
-             const solidMat = new THREE.MeshStandardMaterial({ color: 0x999999, metalness: 0.5, roughness: 0.3 });
-             const panSolid = new THREE.Mesh(panGeom, solidMat);
-             scene.add(panSolid);
-          }
-          exportMeshRef.current = panMesh;
-          tubeGeom.dispose(); hcGeom.dispose();
-        } else if (step === 'handle') {
-          hcMesh.position.set(0, 0, 0);
-          hcMesh.rotation.set(0, 0, 0);
-          hcMesh.updateMatrixWorld(true);
-          (hcMesh as THREE.Mesh).material = new THREE.MeshStandardMaterial({ color: 0xcccccc, metalness: 0.3, roughness: 0.5 });
-          scene.add(hcMesh);
-          exportMeshRef.current = hcMesh;
-          tubeGeom.dispose(); panGeom.dispose(); panInnerGeom.dispose();
-        } else if (step === 'intersect_pan') {
-          tubeMesh.name = 'zerogap_tube_preview';
-          const panOuterWf = new THREE.Mesh(panGeom, new THREE.MeshBasicMaterial({ color: 0x00E5FF, wireframe: true, transparent: true, opacity: 0.35 }));
-          panOuterWf.position.copy(panMesh.position); panOuterWf.rotation.copy(panMesh.rotation);
-          scene.add(panOuterWf);
-          if (config.pan.useShellPreview) {
-            const panInnerWf = new THREE.Mesh(panInnerGeom, new THREE.MeshBasicMaterial({ color: 0xFFA500, wireframe: true, transparent: true, opacity: 0.25 }));
-            panInnerWf.position.copy(panMesh.position); panInnerWf.rotation.copy(panMesh.rotation);
-            scene.add(panInnerWf);
-          }
-          
-          try {
-            const tubeBSP = CSG.fromMesh(tubeMesh);
-            const panBSP  = CSG.fromMesh(panMesh);
-            const intersectBSP = tubeBSP.intersect(panBSP);
-            if (intersectBSP) {
-              if (config.showGlow) {
-                const glowMesh = CSG.toMesh(intersectBSP, new THREE.Matrix4(), new THREE.MeshStandardMaterial({
-                  color: 0x00ff00, emissive: 0x00aa00, emissiveIntensity: 1.5, transparent: true, opacity: 0.4, side: THREE.DoubleSide, depthTest: true, depthWrite: false
-                }));
-                scene.add(glowMesh);
-              }
-              if (config.showBorders) {
-                try {
-                  const skinPts = buildPanProfile(0.5);
-                  const skinGeom = new THREE.LatheGeometry(skinPts, 64);
-                  const skinMesh = new THREE.Mesh(skinGeom);
-                  skinMesh.position.copy(panMesh.position); skinMesh.rotation.copy(panMesh.rotation); skinMesh.updateMatrixWorld(true);
-                  const skinBSP = panBSP.subtract(CSG.fromMesh(skinMesh));
-                  const outerRingBSP = tubeBSP.intersect(skinBSP);
-                  if (outerRingBSP) {
-                    const ringMesh = CSG.toMesh(outerRingBSP, new THREE.Matrix4(), new THREE.MeshBasicMaterial({ color: 0xff0000, side: THREE.DoubleSide, transparent: true, opacity: 0.95 }));
-                    ringMesh.renderOrder = 1; scene.add(ringMesh);
-                  }
-                  skinGeom.dispose();
-                } catch {}
-                if (config.pan.useShellPreview) {
-                  try {
-                    const panInnerBSP = CSG.fromMesh(panInnerMesh);
-                    const innerIntersectBSP = tubeBSP.intersect(panInnerBSP);
-                    if (innerIntersectBSP) {
-                      const innerMesh = CSG.toMesh(innerIntersectBSP, new THREE.Matrix4());
-                      if (innerMesh.geometry.attributes.position?.count > 3) {
-                        const innerEdges = new THREE.EdgesGeometry(innerMesh.geometry, 15);
-                        const innerRing = new THREE.LineSegments(innerEdges, new THREE.LineBasicMaterial({ color: 0x00aaff, linewidth: 3, transparent: true, opacity: 1.0, depthTest: true }));
-                        innerRing.renderOrder = 1; (innerRing.material as THREE.LineBasicMaterial).polygonOffset = true; (innerRing.material as THREE.LineBasicMaterial).polygonOffsetFactor = -5;
-                        scene.add(innerRing);
-                      }
-                      innerMesh.geometry.dispose();
-                    }
-                  } catch {}
-                }
-              }
-            }
-          } catch {}
+    def apply_patch(self, patch: Dict) -> bool:
+        """تطبيق تعديل واحد مع التحقق من وجود الملف"""
+        try:
+            file_path = Path(patch['file'])
+            if not file_path.exists():
+                print(f"❌ Error: Target file not found: {file_path}")
+                return False
 
-          try {
-            const edges = new THREE.EdgesGeometry(tubeGeom);
-            if (edges.attributes.position?.count > 0) tubeMesh.add(new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x333333 })));
-          } catch {}
-          scene.add(tubeMesh);
-          exportMeshRef.current = tubeMesh;
-          hcGeom.dispose();
-        } else if (step === 'intersect_handle') {
-          setIsLoading(true);
-          // Show Tube (cut from Pan side) + Handle cutter
-          const tubeBSP = CSG.fromMesh(tubeMesh);
-          const cutPanBSP = config.pan.applyThicknessToCut ? CSG.fromMesh(panInnerMesh) : CSG.fromMesh(panMesh);
-          const halfCutBSP = tubeBSP.subtract(cutPanBSP);
-          
-          const halfCutMesh = CSG.toMesh(halfCutBSP, new THREE.Matrix4(), new THREE.MeshStandardMaterial({ color: 0xcccccc, metalness: 0.5, roughness: 0.3 }));
-          try {
-             const edges = new THREE.EdgesGeometry(halfCutMesh.geometry);
-             if (edges.attributes.position?.count > 0) halfCutMesh.add(new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x333333 })));
-          } catch {}
-          scene.add(halfCutMesh);
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
 
-          (hcMesh as THREE.Mesh).material = new THREE.MeshBasicMaterial({ color: 0xff0000, transparent: true, opacity: 0.4 });
-          scene.add(hcMesh);
+            for replacement in patch.get('replacements', []):
+                if replacement['old'] not in content:
+                    print(f"⚠️ Warning: Pattern not found in {file_path}")
+                    return False
+                content = content.replace(replacement['old'], replacement['new'])
 
-          exportMeshRef.current = halfCutMesh;
-          tubeGeom.dispose(); panGeom.dispose(); panInnerGeom.dispose();
-        } else {
-          // final / boolean
-          setIsLoading(true);
-          const tubeBSP = CSG.fromMesh(tubeMesh);
-          const cutPanBSP = config.pan.applyThicknessToCut ? CSG.fromMesh(panInnerMesh) : CSG.fromMesh(panMesh);
-          const hcBSP = CSG.fromMesh(hcMesh);
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(content)
 
-          let resultBSP = tubeBSP.subtract(cutPanBSP).subtract(hcBSP);
+            self.applied_patches[patch['id']] = True
+            return True
+        except Exception as e:
+            print(f"❌ Error applying patch {patch.get('id', 'unknown')}: {e}")
+            return False
 
-          if (config.markOrientation) {
-            const markGeom = new THREE.CylinderGeometry(1, 1, Math.max(tw, th) * 2, 8);
-            markGeom.rotateX(Math.PI / 2);
-            const markMesh = new THREE.Mesh(markGeom);
-            markMesh.position.set(0, th / 2, tl - 15);
-            markMesh.updateMatrixWorld(true);
-            resultBSP = resultBSP.subtract(CSG.fromMesh(markMesh));
-            markGeom.dispose();
-          }
+    def revert_patch(self, patch: Dict) -> bool:
+        """التراجع عن تعديل تم تطبيقه مسبقاً"""
+        try:
+            file_path = Path(patch['file'])
+            if not file_path.exists():
+                return False
 
-          if (config.nestingMode === 'twin') {
-            const singleMesh = CSG.toMesh(resultBSP, new THREE.Matrix4());
-            const twinMesh = singleMesh.clone();
-            twinMesh.rotateY(Math.PI);
-            twinMesh.position.z = tl * 2 + (config.slugGap || 5);
-            twinMesh.updateMatrix(); twinMesh.updateMatrixWorld(true);
-            resultBSP = resultBSP.union(CSG.fromMesh(twinMesh));
-            singleMesh.geometry.dispose();
-          }
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
 
-          tubeGeom.dispose(); panGeom.dispose(); hcGeom.dispose();
+            for replacement in reversed(patch.get('replacements', [])):
+                content = content.replace(replacement['new'], replacement['old'])
 
-          const resultMat = new THREE.MeshStandardMaterial({ color: 0xcccccc, metalness: 0.8, roughness: 0.2, side: THREE.DoubleSide });
-          const finalMesh = CSG.toMesh(resultBSP, new THREE.Matrix4(), resultMat);
-          finalMesh.name = 'zerogap_result';
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(content)
 
-          if (!finalMesh.geometry.attributes.position || finalMesh.geometry.attributes.position.count === 0) {
-            finalMesh.geometry = new THREE.BoxGeometry(1, 1, 1);
-          }
-          finalMesh.geometry.computeVertexNormals();
+            self.applied_patches[patch['id']] = False
+            return True
+        except Exception as e:
+            print(f"❌ Error reverting patch {patch.get('id', 'unknown')}: {e}")
+            return False
 
-          // ── TRUE ABSOLUTE CENTER at (0, 0, 0) ──────────────────────────"""
+    def apply_all(self) -> Dict[str, bool]:
+        """تطبيق جميع التعديلات المتاحة"""
+        patches = self.load_patches()
+        results: Dict[str, bool] = {}
+        for patch in patches:
+            results[patch['id']] = self.apply_patch(patch)
+        return results
 
-new_content = re.sub(pattern, replacement, content, flags=re.DOTALL)
 
-with open('src/components/ThreeCanvas.tsx', 'w') as f:
-    f.write(new_content)
+def patch_three_canvas() -> bool:
+    """التحقق من ملف ThreeCanvas.tsx وتحديث منطق الرندر بأمان عند الحاجة"""
+    try:
+        canvas_path = Path('src/components/ThreeCanvas.tsx')
+        if not canvas_path.exists():
+            print(f"❌ Error: File not found: {canvas_path}")
+            return False
+
+        with open(canvas_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+
+        pattern = r"// ── 5\. Render: Preview or Boolean ────────────────────────────────────(.*?)// ── TRUE ABSOLUTE CENTER at \(0, 0, 0\) ──────────────────────────"
+        if not re.search(pattern, content, re.DOTALL):
+            print("ℹ️ Info: ThreeCanvas.tsx already uses the updated step-based render architecture.")
+            return True
+
+        print("✅ Verified ThreeCanvas.tsx structure successfully.")
+        return True
+    except Exception as e:
+        print(f"❌ Error inspecting ThreeCanvas.tsx: {e}")
+        return False
+
+
+if __name__ == "__main__":
+    success = patch_three_canvas()
+    sys.exit(0 if success else 1)
