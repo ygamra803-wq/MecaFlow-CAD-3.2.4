@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { STLExporter } from 'three-stdlib';
-import { exportToSTEP, STEPMetadata } from '../stepExporter';
-import { generateGcode } from '../gcodeGenerator';
+import { exportToSTEP, STEPMetadata, collectSolidMeshes } from '../stepExporter';
+import { GCodeGenerator } from '../gcodeGenerator';
 import { generateCadQueryScript } from '../exportUtils';
 import { ZeroGapState } from '../../types';
 import { AppError, ErrorHandler } from '../errorHandler';
@@ -27,8 +27,54 @@ export interface ExportResult {
 }
 
 /**
+ * استخراج مجموعة نظيفة تحتوي فقط على المضلعات الصلبة الحقيقية (بدون خطوط مساعدة أو مسارات ليزر)
+ * مع تطبيق المصفوفة العالمية وإعادة حساب المتجهات العمودية (Normals) لضمان ملف STL قياسي خالٍ من العيوب.
+ */
+export function buildCleanExportGroup(root: THREE.Object3D): THREE.Group {
+  const cleanGroup = new THREE.Group();
+  const solidMeshes = collectSolidMeshes(root);
+
+  for (const m of solidMeshes) {
+    m.updateMatrixWorld(true);
+    const clonedGeom = m.geometry.clone();
+    clonedGeom.applyMatrix4(m.matrixWorld);
+    clonedGeom.computeVertexNormals();
+    const cleanMesh = new THREE.Mesh(clonedGeom, new THREE.MeshStandardMaterial());
+    cleanGroup.add(cleanMesh);
+  }
+
+  return cleanGroup;
+}
+
+/**
+ * التحقق من سلامة مخرجات STL (ASCII أو Binary)
+ */
+export function validateSTLOutput(content: string | Uint8Array): boolean {
+  if (typeof content === 'string') {
+    if (!content.trim().startsWith('solid') || !content.includes('facet normal') || !content.includes('endsolid')) {
+      throw new AppError('EXPORT_FAILED', 'ملف STL النصي المصدّر فارغ أو لا يحتوي على مثلثات صالحة', 'error');
+    }
+    if (content.includes('NaN') || content.includes('Infinity')) {
+      throw new AppError('EXPORT_FAILED', 'ملف STL يحتوي على قيم رياضية غير معرفة (NaN/Infinity)', 'error');
+    }
+    return true;
+  }
+
+  // Binary STL: 80-byte header + 4-byte uint32 triangle count + 50 bytes per triangle
+  if (content.byteLength < 84) {
+    throw new AppError('EXPORT_FAILED', 'ملف STL الثنائي أصغر من الحد الأدنى القياسي (84 بايت)', 'error');
+  }
+  const view = new DataView(content.buffer, content.byteOffset, content.byteLength);
+  const triCount = view.getUint32(80, true);
+  if (triCount === 0 || content.byteLength !== 84 + triCount * 50) {
+    throw new AppError('EXPORT_FAILED', 'ترويسة عدد المثلثات في ملف STL الثنائي غير متطابقة مع حجم الملف', 'error');
+  }
+  return true;
+}
+
+/**
  * خدمة التصدير الموحدة (ExportService)
- * تجمع تصدير STL, STEP, G-Code, CadQuery Python مع دعم الإضافات (Plugins) والتحقق من المخرجات.
+ * تجمع تصدير STL, STEP, G-Code, CadQuery Python مع دعم الإضافات (Plugins) والتحقق الصارم من المخرجات.
  */
 export class ExportService {
   static registerFormat(format: string, exporter: CustomExporter): void {
@@ -72,12 +118,17 @@ export class ExportService {
           if (!mesh) {
             throw new AppError('INVALID_MESH', 'لا يوجد مجسم ثلاثي الأبعاد لتصديره بصيغة STL');
           }
+          const cleanGroup = buildCleanExportGroup(mesh);
+          if (cleanGroup.children.length === 0) {
+            throw new AppError('INVALID_MESH', 'المجسم لا يحتوي على مضلعات ثلاثية صالحة لتصدير STL');
+          }
           const exporter = new STLExporter();
-          const parsed = exporter.parse(mesh, { binary: !!options.binary });
+          const parsed = exporter.parse(cleanGroup, { binary: !!options.binary });
           const content =
             parsed instanceof DataView
-              ? new Uint8Array(parsed.buffer)
+              ? new Uint8Array(parsed.buffer, parsed.byteOffset, parsed.byteLength)
               : String(parsed);
+          validateSTLOutput(content);
           const fileSize = typeof content === 'string' ? content.length : content.byteLength;
           return {
             success: fileSize > 0,
@@ -106,7 +157,11 @@ export class ExportService {
           if (!options.config) {
             throw new AppError('VALIDATION_ERROR', 'إعدادات الهندسة مطلوبة لتوليد مسار G-Code');
           }
-          const content = generateGcode(options.config);
+          const result = GCodeGenerator.generateGCode(options.config, 'final-inspect');
+          if (result.error) {
+            throw new AppError('EXPORT_FAILED', result.error, 'error');
+          }
+          const content = result.gcode;
           return {
             success: content.length > 0,
             content,
@@ -149,10 +204,18 @@ export class ExportService {
 }
 
 export class ExportManager {
-  static exportSTL(mesh: THREE.Object3D | null): string | null {
+  static exportSTL(mesh: THREE.Object3D | null, binary: boolean = false): string | Uint8Array | null {
     if (!mesh) return null;
+    const cleanGroup = buildCleanExportGroup(mesh);
+    if (cleanGroup.children.length === 0) return null;
     const exporter = new STLExporter();
-    return exporter.parse(mesh) as string;
+    const parsed = exporter.parse(cleanGroup, { binary });
+    const content =
+      parsed instanceof DataView
+        ? new Uint8Array(parsed.buffer, parsed.byteOffset, parsed.byteLength)
+        : String(parsed);
+    validateSTLOutput(content);
+    return content;
   }
 
   static async exportSTEP(mesh: THREE.Object3D | null): Promise<string | null> {

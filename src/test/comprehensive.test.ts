@@ -3,14 +3,16 @@ import * as THREE from 'three';
 import { InputValidator } from '../lib/inputValidator';
 import { CSGProcessor } from '../lib/geometry/CSGProcessor';
 import { ExportService } from '../lib/export/ExportManager';
-import { InputSanitizer, RateLimiter } from '../lib/security';
+import { InputSanitizer, RateLimiter, defaultRateLimiter } from '../lib/security';
 import { validateConfig } from '../lib/validators';
 import { PluginManager } from '../lib/pluginManager';
 import { ThemeManager } from '../lib/themeManager';
 import { ErrorHandler, AppError } from '../lib/errorHandler';
 import { LocalizationService } from '../lib/localizationService';
 import { GCodeGenerator } from '../lib/gcodeGenerator';
-import { ZeroGapState } from '../types';
+import { ParameterValidator } from '../lib/validators/parameterValidator';
+import { CollisionAnalyzer } from '../lib/analysis/CollisionAnalyzer';
+import { ZeroGapState, WIZARD_STEPS } from '../types';
 
 // Mocking AdaptiveBezierCurve for structure tests
 const AdaptiveBezierCurve = {
@@ -315,11 +317,145 @@ describe('GCodeGenerator & Stage 7 Boundary Alignment', () => {
       expect(p.z).toBeLessThanOrEqual(tl / 2 + 0.01);
     }
 
-    const gcodeRes = GCodeGenerator.generateGCode(sampleConfig, 'final-inspect');
+    const gcodeRes = GCodeGenerator.generateGCode({ ...sampleConfig, markOrientation: true }, 'final-inspect');
     expect(gcodeRes.validation.isValid).toBe(true);
     expect(gcodeRes.gcode).toContain('M03');
     expect(gcodeRes.gcode).toContain('M05');
     expect(gcodeRes.gcode).toContain('M30');
+    expect(gcodeRes.gcode).toContain('CUT 0: LASER ORIENTATION MARK');
+    expect(gcodeRes.gcode).toContain('Lead-In onto Saddle Contour');
+    expect(gcodeRes.metrics.totalCutLengthMm).toBeGreaterThan(50);
+    expect(gcodeRes.metrics.pierceCount).toBe(3);
+  });
+
+  it('يجب أن يصدر ExportService ملفات حقيقية صالحة لجميع الصيغ (STEP, STL Binary/ASCII, NC, PY)', async () => {
+    defaultRateLimiter.reset('export-service');
+    const group = new THREE.Group();
+    const geom = new THREE.BoxGeometry(10, 10, 10);
+    const solidMesh = new THREE.Mesh(geom);
+    solidMesh.name = 'zerogap_result';
+    group.add(solidMesh);
+
+    // إضافة مجسم مسار ليزر وهمي للتأكد من أن المصدّر يستبعده تلقائياً ولا يدمجه في المعدن الصلب
+    const helperMesh = new THREE.Mesh(new THREE.BoxGeometry(100, 100, 100));
+    helperMesh.name = 'zerogap_toolpath_pan';
+    group.add(helperMesh);
+
+    // 1. اختبار STEP AP214
+    const stepRes = await ExportService.export(group, { format: 'step' });
+    expect(stepRes.success).toBe(true);
+    const stepText = String(stepRes.content);
+    expect(stepText).toContain('ISO-10303-21;');
+    expect(stepText).toContain('MANIFOLD_SOLID_BREP');
+    expect(stepText).toContain('CLOSED_SHELL');
+    // حجم مكعب 10×10×10 مم هو 1000.00 مم³ (تم استبعاد helperMesh ذي الحجم 1,000,000)
+    expect(stepText).toContain('Volume: 1000.00 mm3');
+    expect(stepText).toContain('BBox: 10.00x10.00x10.00 mm');
+
+    // 2. اختبار STL Binary (12 مثلثاً × 50 بايت + 84 بايت ترويسة = 684 بايت بالضبط)
+    const stlBinRes = await ExportService.export(group, { format: 'stl', binary: true });
+    expect(stlBinRes.success).toBe(true);
+    expect(stlBinRes.content).toBeInstanceOf(Uint8Array);
+    expect(stlBinRes.fileSize).toBe(84 + 12 * 50);
+
+    // 3. اختبار G-Code عبر ExportService
+    const ncRes = await ExportService.export(null, { format: 'nc', config: sampleConfig });
+    expect(ncRes.success).toBe(true);
+    expect(String(ncRes.content)).toContain('O2000');
+    expect(String(ncRes.content)).toContain('M30');
+
+    // 4. اختبار سكربت بايثون CadQuery عبر ExportService
+    const pyRes = await ExportService.export(null, { format: 'py', config: sampleConfig });
+    expect(pyRes.success).toBe(true);
+    const pyText = String(pyRes.content);
+    expect(pyText).toContain('import cadquery as cq');
+    expect(pyText).toContain('nesting_mode        = "single"');
+    expect(pyText).toContain('slug_gap            = 5.0');
+    expect(pyText).toContain('total_tube_length   = 135');
+    expect(pyText).toContain('cq.exporters.export');
+
+    geom.dispose();
+    helperMesh.geometry.dispose();
   });
 });
+
+describe('ParameterValidator across all 7 Wizard Stages', () => {
+  const defaultZeroGap: ZeroGapState = {
+    pan: {
+      bottomDiameter: 120, topDiameter: 280, height: 50, wallProfile: 'curved', curveRadius: 100,
+      rimThickness: 2, bottomFilletRadius: 8, removeBottom: false, addRim: true,
+      rimHeight: 3, wallThickness: 2.0, useShellPreview: true,
+      innerMoldMode: false, applyThicknessToCut: false,
+    },
+    tube: {
+      width: 38, height: 25, thickness: 1.2, totalLength: 120, partLength: 70,
+      fixedHeadLength: 40, fixedTailLength: 30,
+      cornerRadius: 5.75, shape: 'مستطيل',
+    },
+    handle: {
+      shape: 'rectangular', width: 30, height: 20, depth: 80, thickness: 1.5,
+      cornerRadius: 3, angleX: 0, angleY: 0, offsetZ: 0, insertionDepth: 15,
+    },
+    assembly: {
+      tiltAngle: 15, handleAngleX: 0, handleAngleY: 10, handleOffset: 0,
+      insertionDistance: 50, heightOffset: 25, tiltAxis: 'X',
+    },
+    renderMode: 'boolean',
+    addFillet: true,
+    thermalClearance: false,
+    markOrientation: false,
+    showGlow: true,
+    showBorders: true,
+    showToolpathPreview: true,
+    showGcodePath: true,
+    showBodySlices: true,
+    showGhostPart: true,
+    fallbackCutToDepth: true,
+  };
+
+  it('يجب أن تمر جميع المراحل الـ 7 بنجاح دون أخطاء حرجة بالإعدادات الافتراضية أو عند زاوية إمالة 0 درجة', () => {
+    for (const step of WIZARD_STEPS) {
+      const report = ParameterValidator.validateStepParameters(defaultZeroGap, step.id);
+      expect(report.isValid).toBe(true);
+      expect(report.errors.length).toBe(0);
+
+      const zeroTiltConfig: ZeroGapState = {
+        ...defaultZeroGap,
+        assembly: { ...defaultZeroGap.assembly, tiltAngle: 0 },
+      };
+      const zeroTiltReport = ParameterValidator.validateStepParameters(zeroTiltConfig, step.id);
+      expect(zeroTiltReport.isValid).toBe(true);
+      expect(zeroTiltReport.errors.length).toBe(0);
+    }
+  });
+
+  it('يجب التعامل مع الأنبوب الدائري والمقبض الأسطواني باعتماد القطر (width) دون تأثر بارتفاع المقطع المستطيل', () => {
+    const circularConfig: ZeroGapState = {
+      ...defaultZeroGap,
+      tube: { ...defaultZeroGap.tube, shape: 'دائري', width: 40, height: 10, cornerRadius: 20 },
+      handle: { ...defaultZeroGap.handle, shape: 'cylindrical', width: 30, height: 10, cornerRadius: 15 },
+    };
+    const report = ParameterValidator.validateStepParameters(circularConfig, 'final-inspect');
+    expect(report.isValid).toBe(true);
+    expect(report.errors.length).toBe(0);
+  });
+
+  it('يجب أن يكتشف CollisionAnalyzer فجوات عدم التلامس ويصلحها تلقائياً عبر computeAutoFix', () => {
+    // في الإعدادات الافتراضية، المقبض (30×20) أصغر من التجويف الداخلي للأنبوب (35.6×22.6) والارتفاع (25 مم) يسبب فجوة جزئية عند الحافة العلوية للمقلاة
+    const initialReport = CollisionAnalyzer.analyze(defaultZeroGap, 'final-inspect');
+    expect(initialReport.hasGaps).toBe(true);
+    expect(initialReport.handleJoint.maxGapMm).toBeGreaterThan(1.0);
+    expect(initialReport.issues.length).toBeGreaterThan(0);
+
+    // بعد تطبيق computeAutoFix، يجب أن تختفي الفجوات تماماً وتصل كفاءة التطابق الصفري إلى 100%
+    const fixedConfig = CollisionAnalyzer.computeAutoFix(defaultZeroGap);
+    const fixedReport = CollisionAnalyzer.analyze(fixedConfig, 'final-inspect');
+    expect(fixedReport.hasGaps).toBe(false);
+    expect(fixedReport.panJoint.maxGapMm).toBeLessThanOrEqual(0.08);
+    expect(fixedReport.handleJoint.maxGapMm).toBeLessThanOrEqual(0.08);
+    expect(fixedReport.manufacturingReadinessScore).toBe(100);
+  });
+});
+
+
 

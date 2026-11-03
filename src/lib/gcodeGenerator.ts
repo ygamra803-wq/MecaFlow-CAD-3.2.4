@@ -7,8 +7,20 @@ export interface GCodeValidationResult {
   warnings: string[];
 }
 
+export interface GCodeMetrics {
+  totalCutLengthMm: number;
+  pierceCount: number;
+  xMin: number;
+  xMax: number;
+  maxBevelAngleDeg: number;
+  kerfOffsetMm: number;
+  effectiveTubeLengthMm: number;
+  panCutPoints: { x: number; a: number; bevelDeg: number; isCorner: boolean }[];
+  handleCutPoints: { x: number; a: number; bevelDeg: number; isCorner: boolean }[];
+}
+
 /**
- * محرك توليد وفحص G-code المتقدم للماكينات متعددة المحاور (NCCSTUDIO V15)
+ * محرك توليد وفحص G-code المتقدم للماكينات متعددة المحاور (NCCSTUDIO V15 / ISO 6983)
  * متطابق هندسياً بنسبة 100% مع محرك CSG ثلاثي الأبعاد لجميع أشكال الأنابيب والمقالي والمقابض
  */
 export class GCodeGenerator {
@@ -35,14 +47,14 @@ export class GCodeGenerator {
     th: number,
     shape: string,
     cornerRadius: number
-  ): { x: number; y: number } {
+  ): { x: number; y: number; isCorner: boolean } {
     if (shape === 'دائري') {
       const r = tw / 2;
-      return { x: r * Math.cos(phi), y: r * Math.sin(phi) };
+      return { x: r * Math.cos(phi), y: r * Math.sin(phi), isCorner: false };
     }
 
     if (shape === 'بيضاوي') {
-      return { x: (tw / 2) * Math.cos(phi), y: (th / 2) * Math.sin(phi) };
+      return { x: (tw / 2) * Math.cos(phi), y: (th / 2) * Math.sin(phi), isCorner: false };
     }
 
     // مستطيل مع نصف قطر زاوية (Rounded Rectangle) مطابق لـ TubeGenerator.ts
@@ -58,6 +70,7 @@ export class GCodeGenerator {
     const cy = hy - r;
 
     let t = hx;
+    let isCorner = false;
     if (adx > 1e-9 && (hx / adx) * ady <= cy) {
       // تقاطع مع الجدار العمودي المستقيم
       t = hx / adx;
@@ -70,13 +83,15 @@ export class GCodeGenerator {
       const c = cx * cx + cy * cy - r * r;
       const disc = Math.max(0, b * b - c);
       t = b + Math.sqrt(disc);
+      isCorner = true;
     } else {
       const tx = adx > 1e-9 ? hx / adx : Infinity;
       const ty = ady > 1e-9 ? hy / ady : Infinity;
       t = Math.min(tx, ty);
+      isCorner = true;
     }
 
-    return { x: t * dx, y: t * dy };
+    return { x: t * dx, y: t * dy, isCorner };
   }
 
   /**
@@ -189,13 +204,13 @@ export class GCodeGenerator {
   /**
    * حساب نقاط التقاطع ثلاثية الأبعاد وثنائية الأبعاد (X, A) بدقة متناهية
    */
-  private static computeCutProfiles(
+  static computeCutProfiles(
     config: ZeroGapState,
     wizardStep: WizardStep,
     numPoints: number = 360
   ): {
-    panPoints: { x: number; a: number; zRaw: number; phi: number }[];
-    handlePoints: { x: number; a: number; zRaw: number; phi: number }[];
+    panPoints: { x: number; a: number; zRaw: number; phi: number; isCorner: boolean }[];
+    handlePoints: { x: number; a: number; zRaw: number; phi: number; isCorner: boolean }[];
     tl: number;
     tw: number;
     th: number;
@@ -236,7 +251,6 @@ export class GCodeGenerator {
       const x_t = surf.x;
       const y_t = surf.y;
 
-      // الدوران حول محور Z أولاً (tubeRoll) ثم حول محور X (angleRad) وفق ترتيب Euler 'XYZ'
       const x_r = x_t * cosR - y_t * sinR;
       const y_r = x_t * sinR + y_t * cosR;
       const z_r = z;
@@ -272,16 +286,13 @@ export class GCodeGenerator {
       const dy = y_t;
       const dz = z_t - (tl / 2 - hInsertion);
 
-      // معكوس مصفوفة الدوران لـ Euler(alpha, beta, 0, 'XYZ') هو R_y(-beta) * R_x(-alpha)
       const alpha = (hCfg.angleX || 0) * (Math.PI / 180);
       const beta = (hCfg.angleY || 0) * (Math.PI / 180);
 
-      // R_x(-alpha) أولاً
       const x1 = dx;
       const y1 = dy * Math.cos(-alpha) - dz * Math.sin(-alpha);
       const z1 = dy * Math.sin(-alpha) + dz * Math.cos(-alpha);
 
-      // R_y(-beta) ثانياً
       const x2 = x1 * Math.cos(-beta) + z1 * Math.sin(-beta);
       const y2 = y1;
       const z2 = -x1 * Math.sin(-beta) + z1 * Math.cos(-beta);
@@ -320,16 +331,16 @@ export class GCodeGenerator {
       }
     };
 
-    // حل تقاطع الوجه A (المقلاة): نبحث عن نقطة الخروج من المقلاة إلى بدن الأنبوب
-    const panPoints: { x: number; a: number; zRaw: number; phi: number }[] = [];
+    // حل تقاطع الوجه A (المقلاة)
+    const panPoints: { x: number; a: number; zRaw: number; phi: number; isCorner: boolean }[] = [];
     const maxPanSearch = Math.min(tl, Math.max(insertion * 2.2, 80));
     const scanSteps = 80;
 
     for (let i = 0; i <= numPoints; i++) {
       const phi = (i / numPoints) * 2 * Math.PI;
+      const surf = this.getTubeSurfacePoint(phi, tw, th, config.tube.shape, config.tube.cornerRadius);
       let z_sol = 0;
 
-      // البحث من داخل الأنبوب باتجاه الطرف A لإيجاد آخر انتقال من داخل المقلاة (<=0) إلى خارجها (>0)
       let prevZ = 0;
       let prevF = evaluatePanDistance(0, phi);
       let bracketFound = false;
@@ -368,22 +379,22 @@ export class GCodeGenerator {
         }
         z_sol = (low + high) / 2;
       } else {
-        // إذا لم تصل المقلاة لحافة الأنبوب عند هذه الزاوية، فإن الحد الفعلي للقطعة ثلاثية الأبعاد يقع عند الوجه الأمامي z = 0
         z_sol = 0;
       }
 
       let a_deg = phi * (180 / Math.PI);
       if (a_deg < 0) a_deg += 360;
       const zRaw = Math.max(0, Math.min(tl, z_sol));
-      panPoints.push({ x: zRaw, a: a_deg, zRaw, phi });
+      panPoints.push({ x: zRaw, a: a_deg, zRaw, phi, isCorner: surf.isCorner });
     }
 
-    // حل تقاطع الوجه B (المقبض): نبحث عن أول دخول للأنبوب داخل المقبض بالقرب من الطرف B
-    const handlePoints: { x: number; a: number; zRaw: number; phi: number }[] = [];
+    // حل تقاطع الوجه B (المقبض)
+    const handlePoints: { x: number; a: number; zRaw: number; phi: number; isCorner: boolean }[] = [];
     const minHandleSearch = Math.max(0, tl - Math.max(hInsertion * 2.5, 60));
 
     for (let i = 0; i <= numPoints; i++) {
       const phi = (i / numPoints) * 2 * Math.PI;
+      const surf = this.getTubeSurfacePoint(phi, tw, th, config.tube.shape, config.tube.cornerRadius);
       let z_sol = tl;
 
       let prevZ = minHandleSearch;
@@ -425,14 +436,13 @@ export class GCodeGenerator {
         }
         z_sol = (low + high) / 2;
       } else {
-        // إذا لم يتقاطع المقبض مع الجدار الخارجي عند هذه الزاوية، فإن الحد الفعلي للقطعة يقع عند النهاية z = tl
         z_sol = tl;
       }
 
       let a_deg = phi * (180 / Math.PI);
       if (a_deg < 0) a_deg += 360;
       const zRaw = Math.max(0, Math.min(tl, z_sol));
-      handlePoints.push({ x: zRaw, a: a_deg, zRaw, phi });
+      handlePoints.push({ x: zRaw, a: a_deg, zRaw, phi, isCorner: surf.isCorner });
     }
 
     return { panPoints, handlePoints, tl, tw, th };
@@ -463,38 +473,56 @@ export class GCodeGenerator {
   }
 
   /**
-   * توليد كود الـ G-code بدقة صناعية وحساب الوقت الفعلي
+   * توليد كود الـ G-code بدقة صناعية مع تعويض عرض شعاع الليزر (Kerf Compensation)،
+   * ومسار الدخول/الخروج الآمن (Lead-in / Lead-out)، وتخفيض السرعة التكيفي عند الزوايا.
    */
   static generateGCode(
     config: ZeroGapState,
     wizardStep: WizardStep,
-    opts?: { feedRate?: number; spindleSpeed?: number; safetyHeight?: number }
+    opts?: { feedRate?: number; spindleSpeed?: number; safetyHeight?: number; kerfOffsetMm?: number }
   ): {
     gcode: string;
     validation: GCodeValidationResult;
     estimatedTime: number;
+    metrics: GCodeMetrics;
     error?: string;
   } {
     const feed = opts?.feedRate || 1200;
+    const cornerFeed = Math.round(feed * 0.65);
     const spindle = opts?.spindleSpeed || 1500;
     const sHeight = opts?.safetyHeight || 5.0;
+    const kerfOffsetMm = opts?.kerfOffsetMm ?? 0.15; // تعويض نصف عرض شعاع الليزر (0.15 مم) باتجاه الفضلات
 
     const { panPoints, handlePoints, tl, tw, th } = this.computeCutProfiles(config, wizardStep, 180);
 
     const pPointsSorted = [...panPoints].sort((p1, p2) => p1.a - p2.a);
     const hPointsSorted = [...handlePoints].sort((p1, p2) => p1.a - p2.a);
 
-    const pPointsUnique: { x: number; a: number }[] = [];
-    for (const pt of pPointsSorted) {
+    const pPointsUnique: { x: number; a: number; bevelDeg: number; isCorner: boolean }[] = [];
+    for (let i = 0; i < pPointsSorted.length; i++) {
+      const pt = pPointsSorted[i];
       if (pPointsUnique.length === 0 || Math.abs(pt.a - pPointsUnique[pPointsUnique.length - 1].a) > 0.01) {
-        pPointsUnique.push({ x: pt.x, a: pt.a });
+        const nextPt = pPointsSorted[(i + 1) % pPointsSorted.length];
+        const dx = nextPt.x - pt.x;
+        const ds = Math.max(0.1, Math.abs(nextPt.a - pt.a) * (Math.PI / 180) * ((tw + th) / 4));
+        const bevelDeg = Math.max(-45, Math.min(45, Math.atan2(dx, ds) * (180 / Math.PI)));
+        // إزاحة Kerf للطرف الأمامي A باتجاه الفضلة الأمامية (-X)
+        const xKerf = Math.max(0, pt.x - kerfOffsetMm);
+        pPointsUnique.push({ x: xKerf, a: pt.a, bevelDeg, isCorner: pt.isCorner });
       }
     }
 
-    const hPointsUnique: { x: number; a: number }[] = [];
-    for (const pt of hPointsSorted) {
+    const hPointsUnique: { x: number; a: number; bevelDeg: number; isCorner: boolean }[] = [];
+    for (let i = 0; i < hPointsSorted.length; i++) {
+      const pt = hPointsSorted[i];
       if (hPointsUnique.length === 0 || Math.abs(pt.a - hPointsUnique[hPointsUnique.length - 1].a) > 0.01) {
-        hPointsUnique.push({ x: pt.x, a: pt.a });
+        const nextPt = hPointsSorted[(i + 1) % hPointsSorted.length];
+        const dx = nextPt.x - pt.x;
+        const ds = Math.max(0.1, Math.abs(nextPt.a - pt.a) * (Math.PI / 180) * ((tw + th) / 4));
+        const bevelDeg = Math.max(-45, Math.min(45, Math.atan2(dx, ds) * (180 / Math.PI)));
+        // إزاحة Kerf للطرف الخلفي B باتجاه الفضلة الخلفية (+X)
+        const xKerf = Math.min(tl, pt.x + kerfOffsetMm);
+        hPointsUnique.push({ x: xKerf, a: pt.a, bevelDeg, isCorner: pt.isCorner });
       }
     }
 
@@ -503,74 +531,145 @@ export class GCodeGenerator {
         gcode: '',
         validation: { isValid: false, errors: ['خطأ في معالجة نقاط التقاطع للأنبوب والمقلاة.'], warnings: [] },
         estimatedTime: 0,
+        metrics: {
+          totalCutLengthMm: 0,
+          pierceCount: 0,
+          xMin: 0,
+          xMax: 0,
+          maxBevelAngleDeg: 0,
+          kerfOffsetMm,
+          effectiveTubeLengthMm: tl,
+          panCutPoints: [],
+          handleCutPoints: [],
+        },
         error: 'خطأ في معالجة نقاط التقاطع للأنبوب والمقلاة. يرجى مراجعة قيم التصميم وزوايا الاتصال.',
       };
     }
 
     const lines: string[] = [];
     lines.push('%');
-    lines.push('O2000 (MECAFLOW-CAD V2.3 ZERO-GAP INDUSTRIAL G-CODE)');
-    lines.push('(Generated directly by MecaFlow Machine Interface)');
-    lines.push(`(Date: ${new Date().toISOString().split('T')[0]} - Time: ${new Date().toLocaleTimeString('ar-EG')})`);
-    lines.push('(Laser Power: 1500W, Auxiliary Gas: O2)');
-    lines.push(`(TUBE OUTER BOUNDS: ${tw}mm x ${th}mm, LENGTH: ${tl.toFixed(2)}mm)`);
-    lines.push(`(PAN BOTTOM: ${config.pan.bottomDiameter}mm, TOP: ${config.pan.topDiameter}mm)`);
-    lines.push(`(HANDLE WIDTH: ${config.handle.width}mm, DEPTH: ${config.handle.depth}mm)`);
+    lines.push('O2000 (MECAFLOW-CAD V2.3.1 ZERO-GAP INDUSTRIAL 5-AXIS LASER G-CODE)');
+    lines.push('(Controller: NCCSTUDIO V15 / CypTube / Fanuc ISO-6983)');
+    lines.push(`(Generated : ${new Date().toISOString()})`);
+    lines.push(`(Laser Power: ${spindle}W | Assist Gas: O2 1.2MPa | Kerf Offset: ${kerfOffsetMm.toFixed(2)}mm)`);
+    lines.push(`(TUBE PROFILE: ${config.tube.shape} ${tw}mm x ${th}mm x t=${config.tube.thickness}mm | STOCK L=${tl.toFixed(2)}mm | NET BODY=${config.tube.partLength}mm)`);
+    lines.push(`(PAN CUT [END A]: Bottom D=${config.pan.bottomDiameter}mm, Top D=${config.pan.topDiameter}mm, Tilt=${config.assembly.tiltAngle}deg)`);
+    lines.push(`(HANDLE CUT [END B]: ${config.handle.shape} ${config.handle.width}x${config.handle.height}x${config.handle.depth}mm, Insert=${config.handle.insertionDepth}mm)`);
     lines.push('');
 
     lines.push('G17 (XY Plane Selection)');
     lines.push('G90 (Absolute Positioning)');
     lines.push('G21 (Units in Millimeters)');
-    lines.push(`F${feed} (Set Feedrate in mm/min)`);
-    lines.push(`S${spindle} (Set Spindle / Laser Intensity)`);
+    lines.push('G40 (Software Kerf Pre-Compensated in Contour)');
+    lines.push(`F${feed} (Base Cutting Feedrate mm/min)`);
+    lines.push(`S${spindle} (CW Fiber Laser Power)`);
     lines.push('');
 
     let estimatedTime = 0;
+    let totalCutLengthMm = 0;
+    let pierceCount = 0;
+    let xMin = Infinity;
+    let xMax = -Infinity;
+    let maxBevelAngleDeg = 0;
+
+    // Stage 0: Laser Orientation Mark (إذا كان مفعلاً)
+    if (config.markOrientation) {
+      const markX = tl * 0.5;
+      pierceCount += 1;
+      lines.push('(-------------------------------------------)');
+      lines.push('(CUT 0: LASER ORIENTATION MARK AT TOP FACE)');
+      lines.push('(-------------------------------------------)');
+      lines.push('M05 (Laser OFF)');
+      lines.push(`G00 Z${sHeight.toFixed(3)}`);
+      lines.push(`G00 X${markX.toFixed(4)} A90.0000`);
+      lines.push('G00 Z0.500 (Marking Focal Height)');
+      lines.push('S400 (Low Pulse Marking Power)');
+      lines.push('M03 (Laser ON - Etch Reference Dot)');
+      lines.push('G04 P0.25 (Dwell 0.25s for permanent reference mark)');
+      lines.push('M05 (Laser OFF)');
+      lines.push(`S${spindle} (Restore Full Cutting Power)`);
+      lines.push(`G00 Z${sHeight.toFixed(3)}`);
+      lines.push('');
+      estimatedTime += 1.2;
+    }
 
     // Cut 1: Pan profile at End A
+    pierceCount += 1;
+    const pLeadInX = Math.max(0, pPointsUnique[0].x - 1.5);
     lines.push('(-------------------------------------------)');
-    lines.push('(CUT 1: PAN PROFILE AT END A)');
+    lines.push('(CUT 1: PAN SADDLE PROFILE AT END A)');
     lines.push('(-------------------------------------------)');
     lines.push('M05 (Laser OFF)');
-    lines.push(`G00 X${pPointsUnique[0].x.toFixed(4)} A${pPointsUnique[0].a.toFixed(4)}`);
+    lines.push(`G00 Z${sHeight.toFixed(3)}`);
+    lines.push(`G00 X${pLeadInX.toFixed(4)} A${pPointsUnique[0].a.toFixed(4)} (Rapid to Lead-In Pierce Point in Waste)`);
+    lines.push('G00 Z0.000 (Cutting Height)');
     lines.push('M03 (Laser ON)');
-    lines.push('G04 P0.5 (Dwell 0.5s to pierce metal)');
+    lines.push('G04 P0.5 (Dwell 0.5s to pierce tube wall)');
+    lines.push(`G01 X${pPointsUnique[0].x.toFixed(4)} A${pPointsUnique[0].a.toFixed(4)} F${cornerFeed} (Lead-In onto Saddle Contour)`);
 
     let currentPos = new THREE.Vector3(pPointsUnique[0].x, 0, pPointsUnique[0].a);
+    let activeFeed = cornerFeed;
+
     for (const pt of pPointsUnique) {
-      lines.push(`G01 X${pt.x.toFixed(4)} A${pt.a.toFixed(4)}`);
-      const dist = Math.hypot(pt.x - currentPos.x, (pt.a - currentPos.z) * (Math.PI / 180) * (tw / 2));
-      estimatedTime += (dist / feed) * 60;
+      xMin = Math.min(xMin, pt.x);
+      xMax = Math.max(xMax, pt.x);
+      maxBevelAngleDeg = Math.max(maxBevelAngleDeg, Math.abs(pt.bevelDeg));
+
+      const targetFeed = pt.isCorner ? cornerFeed : feed;
+      const feedToken = targetFeed !== activeFeed ? ` F${targetFeed}` : '';
+      activeFeed = targetFeed;
+
+      lines.push(`G01 X${pt.x.toFixed(4)} A${pt.a.toFixed(4)}${feedToken}`);
+      const dist = Math.hypot(pt.x - currentPos.x, (pt.a - currentPos.z) * (Math.PI / 180) * ((tw + th) / 4));
+      totalCutLengthMm += dist;
+      estimatedTime += (dist / activeFeed) * 60;
       currentPos.set(pt.x, 0, pt.a);
     }
-    lines.push(`G01 X${pPointsUnique[0].x.toFixed(4)} A${pPointsUnique[0].a.toFixed(4)}`);
+    lines.push(`G01 X${pPointsUnique[0].x.toFixed(4)} A360.0000 F${feed} (Close Saddle Loop)`);
     lines.push('M05 (Laser OFF)');
+    lines.push(`G00 Z${sHeight.toFixed(3)} (Retract Safe Z)`);
     lines.push('');
 
     // Cut 2: Handle profile at End B
     if (hPointsUnique.length >= 3) {
+      pierceCount += 1;
+      const hLeadInX = Math.min(tl, hPointsUnique[0].x + 1.5);
       lines.push('(-------------------------------------------)');
-      lines.push('(CUT 2: HANDLE PROFILE AT END B)');
+      lines.push('(CUT 2: HANDLE SLOT PROFILE AT END B)');
       lines.push('(-------------------------------------------)');
       lines.push('M05 (Laser OFF)');
-      lines.push(`G00 X${hPointsUnique[0].x.toFixed(4)} A${hPointsUnique[0].a.toFixed(4)}`);
+      lines.push(`G00 X${hLeadInX.toFixed(4)} A${hPointsUnique[0].a.toFixed(4)} (Rapid to Lead-In Pierce Point in Waste)`);
+      lines.push('G00 Z0.000 (Cutting Height)');
       lines.push('M03 (Laser ON)');
-      lines.push('G04 P0.5 (Dwell 0.5s to pierce metal)');
+      lines.push('G04 P0.5 (Dwell 0.5s to pierce tube wall)');
+      lines.push(`G01 X${hPointsUnique[0].x.toFixed(4)} A${hPointsUnique[0].a.toFixed(4)} F${cornerFeed} (Lead-In onto Handle Contour)`);
 
       currentPos.set(hPointsUnique[0].x, 0, hPointsUnique[0].a);
+      activeFeed = cornerFeed;
+
       for (const pt of hPointsUnique) {
-        lines.push(`G01 X${pt.x.toFixed(4)} A${pt.a.toFixed(4)}`);
-        const dist = Math.hypot(pt.x - currentPos.x, (pt.a - currentPos.z) * (Math.PI / 180) * (tw / 2));
-        estimatedTime += (dist / feed) * 60;
+        xMin = Math.min(xMin, pt.x);
+        xMax = Math.max(xMax, pt.x);
+        maxBevelAngleDeg = Math.max(maxBevelAngleDeg, Math.abs(pt.bevelDeg));
+
+        const targetFeed = pt.isCorner ? cornerFeed : feed;
+        const feedToken = targetFeed !== activeFeed ? ` F${targetFeed}` : '';
+        activeFeed = targetFeed;
+
+        lines.push(`G01 X${pt.x.toFixed(4)} A${pt.a.toFixed(4)}${feedToken}`);
+        const dist = Math.hypot(pt.x - currentPos.x, (pt.a - currentPos.z) * (Math.PI / 180) * ((tw + th) / 4));
+        totalCutLengthMm += dist;
+        estimatedTime += (dist / activeFeed) * 60;
         currentPos.set(pt.x, 0, pt.a);
       }
-      lines.push(`G01 X${hPointsUnique[0].x.toFixed(4)} A${hPointsUnique[0].a.toFixed(4)}`);
+      lines.push(`G01 X${hPointsUnique[0].x.toFixed(4)} A360.0000 F${feed} (Close Handle Loop)`);
       lines.push('M05 (Laser OFF)');
       lines.push('');
     }
 
     lines.push(`G00 Z${sHeight.toFixed(3)} (Safety Height to clear part)`);
-    lines.push('M30 (Program End)');
+    lines.push('G00 X0.0000 A0.0000 (Return Rotary Chuck to Home)');
+    lines.push('M30 (Program End & Rewind)');
     lines.push('%');
 
     const gcode = lines.join('\n');
@@ -580,6 +679,17 @@ export class GCodeGenerator {
       gcode,
       validation,
       estimatedTime: estimatedTime / 60,
+      metrics: {
+        totalCutLengthMm,
+        pierceCount,
+        xMin: Number.isFinite(xMin) ? xMin : 0,
+        xMax: Number.isFinite(xMax) ? xMax : tl,
+        maxBevelAngleDeg,
+        kerfOffsetMm,
+        effectiveTubeLengthMm: tl,
+        panCutPoints: pPointsUnique,
+        handleCutPoints: hPointsUnique,
+      },
     };
   }
 
@@ -634,7 +744,7 @@ export class GCodeGenerator {
 /**
  * التوافقية الكاملة للواجهة الحالية
  */
-export const generateGcode = (config: ZeroGapState, wizardStep: WizardStep): { gcode: string; error?: string } => {
+export const generateGcode = (config: ZeroGapState, wizardStep: WizardStep = 'final-inspect'): { gcode: string; error?: string } => {
   const result = GCodeGenerator.generateGCode(config, wizardStep);
   if (result.error) {
     return { gcode: '', error: result.error };

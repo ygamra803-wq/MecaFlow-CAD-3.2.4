@@ -136,6 +136,7 @@ export interface ZeroGapState {
   showGcodePath?: boolean;
   showBodySlices?: boolean;
   fallbackCutToDepth?: boolean;
+  showCollisionAnalysis?: boolean;
 }
 
 export interface CADState {

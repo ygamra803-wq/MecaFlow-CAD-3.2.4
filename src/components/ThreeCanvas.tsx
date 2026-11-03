@@ -14,13 +14,14 @@ import { ExportManager } from '../lib/export/ExportManager';
 import { GCodeGenerator } from '../lib/gcodeGenerator';
 import { ViewportGizmo } from './ViewportGizmo';
 import { errorHandler } from '../lib/errorHandler';
-import { ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Box, Focus, Cylinder, Ruler } from 'lucide-react';
+import { ArrowUp, ArrowDown, ArrowLeft, ArrowRight, Box, Focus, Cylinder, Ruler, ShieldAlert } from 'lucide-react';
 import { WorkerPool } from '../lib/workerPool';
 import { MeasurementTool } from './measure/MeasurementTool';
 import { AdvancedTubeGeometry } from '../lib/geometry/AdvancedTubeGeometry';
 import AdvancedMeasurementTool from './measure/AdvancedMeasurementTool';
 import PhysicalAnalysisPanel from './analysis/PhysicalAnalysisPanel';
 import ComparisonAndReports from './reports/ComparisonAndReports';
+import { CollisionAnalyzer, GapSamplePoint } from '../lib/analysis/CollisionAnalyzer';
 
 
 
@@ -59,12 +60,24 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
   const geometryEngine = useRef(new GeometryEngine()).current;
   const pipelineRef = useRef<RenderPipeline | null>(null);
 
-  // ─── Interactive Measurement Tool ───────────────────────────────────────────
+  // ─── Interactive Measurement Tool & Collision Detector ──────────────────────
   const [isMeasuring, setIsMeasuring] = useState<boolean>(false);
+  const [localCollisionOverlay, setLocalCollisionOverlay] = useState<boolean>(false);
   const [advancedActiveTab, setAdvancedActiveTab] = useState<'measurement' | 'analysis' | 'reports'>('measurement');
   const [advancedMeasurements, setAdvancedMeasurements] = useState<any[]>([]);
 
   const isInspectionStep = wizardStep === 'technical-review' || wizardStep === 'final-inspect';
+  const isAssemblyOrInspectionStep =
+    wizardStep === 'pan-tube-cut' ||
+    wizardStep === 'tube-handle-cut' ||
+    wizardStep === 'technical-review' ||
+    wizardStep === 'final-inspect';
+  const isCollisionOverlayActive = !!(config.showCollisionAnalysis || localCollisionOverlay);
+
+  const liveCollisionReport = useMemo(() => {
+    if (!isAssemblyOrInspectionStep) return null;
+    return CollisionAnalyzer.analyze(config, wizardStep);
+  }, [config, wizardStep, isAssemblyOrInspectionStep]);
 
   const advancedTubeInstance = useMemo(() => {
     if (!isInspectionStep) return null;
@@ -791,6 +804,12 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
 
           if (wizardStep === 'pan-design') {
             if (panGeom && panMesh) {
+              if (panMesh.material instanceof THREE.MeshStandardMaterial) {
+                panMesh.material.transparent = true;
+                panMesh.material.opacity = 0.55;
+                panMesh.material.side = THREE.DoubleSide;
+              }
+              scene.add(panMesh);
               const panOuterWf = new THREE.Mesh(panGeom, new THREE.MeshBasicMaterial({ color: 0x00E5FF, wireframe: true, transparent: true, opacity: 0.35 }));
               panOuterWf.name = 'zerogap_pan_outer_wf';
               scene.add(panOuterWf);
@@ -799,7 +818,7 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
                 panInnerWf.name = 'zerogap_pan_inner_wf';
                 scene.add(panInnerWf);
               }
-              exportMeshRef.current = panOuterWf;
+              exportMeshRef.current = panMesh;
               setIsLoading(false);
               if (controlsRef.current && cameraRef.current && shouldRecenter) {
                 const bb = new THREE.Box3().setFromObject(panOuterWf);
@@ -918,6 +937,226 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
         }
 
         tubePivot.updateMatrixWorld(true);
+
+        // =====================================================================
+        // COLLISION & GAP 3D RED HIGHLIGHTING ENGINE (Stages 4, 5, 6, 7)
+        // =====================================================================
+        const renderCollisionAndGapHighlights = (
+          centerOffset?: THREE.Vector3,
+          isPreviewMode: boolean = false
+        ) => {
+          if (!isCollisionOverlayActive) return;
+
+          const activeHandleCutGeom = handleCutGeom || handleGeom;
+          const ev = new Evaluator();
+          const tBrush = getBrush(tubeMesh, tubeGeom);
+
+          const addTarget = isPreviewMode ? tubeMesh : scene;
+          const applyOffset = (geom: THREE.BufferGeometry) => {
+            if (!isPreviewMode && centerOffset) {
+              geom.translate(-centerOffset.x, -centerOffset.y, -centerOffset.z);
+            }
+          };
+
+          // 1. تظليل مناطق تداخل الأجزاء الفعلي (CSG INTERSECTION Volume) باللون الأحمر القرمزي
+          const buildInterferenceHighlight = (
+            otherMesh: THREE.Mesh,
+            otherGeom: THREE.BufferGeometry,
+            namePrefix: string
+          ) => {
+            try {
+              const oBrush = getBrush(otherMesh, otherGeom);
+              const interBrush = ev.evaluate(tBrush, oBrush, INTERSECTION);
+              if (interBrush?.geometry?.attributes?.position?.count > 0) {
+                const interGeom = interBrush.geometry.clone();
+                interGeom.computeVertexNormals();
+                applyOffset(interGeom);
+
+                const redVolMat = new THREE.MeshStandardMaterial({
+                  color: 0xff1744,
+                  emissive: 0xd50000,
+                  emissiveIntensity: 0.75,
+                  roughness: 0.25,
+                  metalness: 0.3,
+                  transparent: true,
+                  opacity: 0.58,
+                  depthWrite: false,
+                  depthTest: false,
+                  side: THREE.DoubleSide,
+                });
+                const redVolMesh = new THREE.Mesh(interGeom, redVolMat);
+                redVolMesh.name = `${namePrefix}_vol`;
+                redVolMesh.renderOrder = 10001;
+
+                const edgeGeom = new THREE.EdgesGeometry(interGeom, 25);
+                const edgeLines = new THREE.LineSegments(
+                  edgeGeom,
+                  new THREE.LineBasicMaterial({
+                    color: 0xff5252,
+                    depthTest: false,
+                    transparent: true,
+                    opacity: 0.95,
+                  })
+                );
+                edgeLines.name = `${namePrefix}_edges`;
+                edgeLines.renderOrder = 10002;
+                redVolMesh.add(edgeLines);
+
+                addTarget.add(redVolMesh);
+              }
+            } catch (err) {
+              console.warn('Collision volume highlight skipped:', err);
+            }
+          };
+
+          if (
+            (wizardStep === 'pan-tube-cut' ||
+              wizardStep === 'technical-review' ||
+              wizardStep === 'final-inspect') &&
+            panGeom &&
+            panMesh &&
+            shouldShowPan
+          ) {
+            const pG = config.pan.applyThicknessToCut && panInnerGeom ? panInnerGeom : panGeom;
+            buildInterferenceHighlight(panMesh, pG, 'zerogap_collision_pan');
+          }
+
+          if (
+            (wizardStep === 'tube-handle-cut' ||
+              wizardStep === 'technical-review' ||
+              wizardStep === 'final-inspect') &&
+            activeHandleCutGeom &&
+            handleMeshObj
+          ) {
+            buildInterferenceHighlight(handleMeshObj, activeHandleCutGeom, 'zerogap_collision_handle');
+          }
+
+          // 2. تظليل الفجوات غير الصفرية (Zero-Gap Breaches / Gaps) بأشرطة حمراء ثلاثية الأبعاد وحلقات تنبيه متوهجة
+          const analysis = CollisionAnalyzer.analyze(config, wizardStep);
+
+          const buildGapRibbonMesh = (samples: GapSamplePoint[], namePrefix: string) => {
+            const positions: number[] = [];
+            const borderPoints: THREE.Vector3[] = [];
+            const n = samples.length;
+
+            for (let i = 0; i < n; i++) {
+              const s0 = samples[i];
+              const s1 = samples[(i + 1) % n];
+              if (s0.gapMm <= 0.08 && s1.gapMm <= 0.08) continue;
+
+              const a0 = s0.tubePoint3D.clone();
+              const b0 = s0.targetPoint3D.clone();
+              const a1 = s1.tubePoint3D.clone();
+              const b1 = s1.targetPoint3D.clone();
+
+              // مثلثان يشكلان شريط الفجوة الحمراء بين حافة الأنبوب والسطح المقابل
+              positions.push(
+                a0.x, a0.y, a0.z,
+                b0.x, b0.y, b0.z,
+                b1.x, b1.y, b1.z,
+                a0.x, a0.y, a0.z,
+                b1.x, b1.y, b1.z,
+                a1.x, a1.y, a1.z
+              );
+
+              borderPoints.push(a0, b0, b0, b1, a0, a1);
+            }
+
+            if (positions.length > 0) {
+              const ribbonGeom = new THREE.BufferGeometry();
+              ribbonGeom.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+              ribbonGeom.computeVertexNormals();
+              applyOffset(ribbonGeom);
+
+              const ribbonMat = new THREE.MeshStandardMaterial({
+                color: 0xff0033,
+                emissive: 0xff1744,
+                emissiveIntensity: 1.15,
+                roughness: 0.2,
+                metalness: 0.1,
+                transparent: true,
+                opacity: 0.78,
+                depthWrite: false,
+                depthTest: false,
+                side: THREE.DoubleSide,
+              });
+              const ribbonMesh = new THREE.Mesh(ribbonGeom, ribbonMat);
+              ribbonMesh.name = `${namePrefix}_gap_ribbon`;
+              ribbonMesh.renderOrder = 10003;
+
+              if (borderPoints.length > 0) {
+                const borderGeom = new THREE.BufferGeometry().setFromPoints(borderPoints);
+                applyOffset(borderGeom);
+                const borderLines = new THREE.LineSegments(
+                  borderGeom,
+                  new THREE.LineBasicMaterial({
+                    color: 0xff8a80,
+                    depthTest: false,
+                    transparent: true,
+                    opacity: 0.95,
+                  })
+                );
+                borderLines.name = `${namePrefix}_gap_lines`;
+                borderLines.renderOrder = 10004;
+                ribbonMesh.add(borderLines);
+              }
+
+              addTarget.add(ribbonMesh);
+            }
+          };
+
+          if (
+            wizardStep === 'pan-tube-cut' ||
+            wizardStep === 'technical-review' ||
+            wizardStep === 'final-inspect'
+          ) {
+            buildGapRibbonMesh(analysis.panJoint.samples, 'zerogap_collision_pan');
+            for (const sec of analysis.panJoint.gapSectors) {
+              const markerGeom = new THREE.SphereGeometry(1.15, 16, 16);
+              const markerPos = sec.centerPoint3D.clone();
+              markerGeom.translate(markerPos.x, markerPos.y, markerPos.z);
+              applyOffset(markerGeom);
+              const markerMesh = new THREE.Mesh(
+                markerGeom,
+                new THREE.MeshBasicMaterial({
+                  color: 0xff1744,
+                  depthTest: false,
+                  transparent: true,
+                  opacity: 0.95,
+                })
+              );
+              markerMesh.name = 'zerogap_collision_pan_hotspot';
+              markerMesh.renderOrder = 10005;
+              addTarget.add(markerMesh);
+            }
+          }
+
+          if (
+            wizardStep === 'tube-handle-cut' ||
+            wizardStep === 'technical-review' ||
+            wizardStep === 'final-inspect'
+          ) {
+            buildGapRibbonMesh(analysis.handleJoint.samples, 'zerogap_collision_handle');
+            for (const sec of analysis.handleJoint.gapSectors) {
+              const markerGeom = new THREE.SphereGeometry(1.15, 16, 16);
+              const markerPos = sec.centerPoint3D.clone();
+              markerGeom.translate(markerPos.x, markerPos.y, markerPos.z);
+              applyOffset(markerGeom);
+              const markerMesh = new THREE.Mesh(
+                markerGeom,
+                new THREE.MeshBasicMaterial({
+                  color: 0xff1744,
+                  depthTest: false,
+                  transparent: true,
+                  opacity: 0.95,
+                })
+              );
+              markerMesh.name = 'zerogap_collision_handle_hotspot';
+              markerMesh.renderOrder = 10005;
+              addTarget.add(markerMesh);
+            }
+          }
+        };
 
 
         // =====================================================================
@@ -1115,6 +1354,12 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
               }
            }
 
+           // تظليل مناطق التداخل والفجوات باللون الأحمر في المرحلتين 4 و 5
+           renderCollisionAndGapHighlights(
+             finalResultMesh?.userData?.centeredOffset,
+             effectiveRenderMode === 'preview'
+           );
+
           return true;
         };
 
@@ -1133,7 +1378,11 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
           /**
            * رسم مسارات الليزر والـ G-Code في المرحلة 7 متطابقة بنسبة 100% مع الإحداثيات المحلية للقطعة النهائية
            */
-          const drawCNCPath = (centerOffset: THREE.Vector3 | undefined) => {
+          const drawCNCPath = (
+            centerOffset: THREE.Vector3 | undefined,
+            panColor: number = 0x00ffaa,
+            handleColor: number = 0x00ffaa
+          ) => {
             try {
               const { panPoints3D, handlePoints3D } = GCodeGenerator.generatePoints(config, wizardStep);
 
@@ -1204,8 +1453,8 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
                 scene.add(pathMesh);
               };
 
-              createGlowingLine(panPoints3D, 0x00ffaa, 'zerogap_toolpath_pan');
-              createGlowingLine(handlePoints3D, 0x00ffaa, 'zerogap_toolpath_handle');
+              createGlowingLine(panPoints3D, panColor, 'zerogap_toolpath_pan');
+              createGlowingLine(handlePoints3D, handleColor, 'zerogap_toolpath_handle');
             } catch (e) {
               console.error("Failed to generate CNC toolpath preview", e);
             }
@@ -1397,77 +1646,32 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
             } catch(e) {}
           }
 
-          // --- SADDLE CURVES & TECHNICAL LASER ---
-          if ((config.showToolpathPreview && wizardStep !== 'final-inspect') || (config.showGcodePath && wizardStep === 'final-inspect')) {
-             const saddleColorPan = wizardStep === 'final-inspect' ? 0x00ffaa : 0x3b82f6;
-             const saddleColorHandle = wizardStep === 'final-inspect' ? 0x00ffaa : 0xfbbf24;
-
-             // Pan Cut saddle & laser
-             if (panGeom && panMesh) {
-               try {
-                 const pG = config.pan.applyThicknessToCut && panInnerGeom ? panInnerGeom : panGeom;
-                 const outerBrush = getBrush(panMesh, pG);
-                 const contactForEdges = ev.evaluate(tBrush, outerBrush, INTERSECTION);
-                 const edges = new THREE.EdgesGeometry(contactForEdges.geometry, 30);
-                 const filteredEdges = filterCutPathEdges(edges, tl, config.tube.width, config.tube.height || config.tube.width, config.tube.shape === 'دائري', effectiveRenderMode === 'boolean' ? mainGeomBounds : undefined);
-
-                 const saddle = new THREE.LineSegments(filteredEdges, new THREE.LineBasicMaterial({
-                   color: saddleColorPan, linewidth: 2, depthTest: false, transparent: true, opacity: 0.9
-                 }));
-                 saddle.name = 'zerogap_pan_ring';
-                 saddle.renderOrder = 9999;
-
-                 if (centerOffset) saddle.geometry.translate(-centerOffset.x, -centerOffset.y, -centerOffset.z);
-                 scene.add(saddle);
-               } catch(e) {}
-             }
-
-             // Handle Cut saddle & laser
-             if (activeHandleCutGeom && handleMeshObj) {
-               try {
-                 const hBrush = getBrush(handleMeshObj, activeHandleCutGeom);
-                 let baseBrush = tBrush;
-                 if (effectiveRenderMode === 'boolean') {
-                    baseBrush = getBrush(tubeMesh, r4Geom);
-                 }
-                 const contact = ev.evaluate(baseBrush, hBrush, INTERSECTION);
-                 if (contact && contact.geometry.attributes.position?.count > 0) {
-                   const edges = new THREE.EdgesGeometry(contact.geometry, 30);
-                   const filteredEdges = filterCutPathEdges(edges, tl, config.tube.width, config.tube.height || config.tube.width, config.tube.shape === 'دائري', effectiveRenderMode === 'boolean' ? mainGeomBounds : undefined);
-
-                   const saddle = new THREE.LineSegments(filteredEdges, new THREE.LineBasicMaterial({
-                     color: saddleColorHandle, linewidth: 2, depthTest: false, transparent: true, opacity: 0.9
-                   }));
-                   saddle.name = 'zerogap_handle_ring';
-                   saddle.renderOrder = 9999;
-
-                   if (centerOffset) saddle.geometry.translate(-centerOffset.x, -centerOffset.y, -centerOffset.z);
-                   scene.add(saddle);
-                 }
-               } catch(e) {}
-             }
+          // --- CNC & SADDLE TOOLPATH PREVIEW (STAGES 6 & 7) ---
+          if (wizardStep === 'technical-review' && config.showToolpathPreview) {
+            drawCNCPath(centerOffset, 0x3b82f6, 0xfbbf24);
+          } else if (wizardStep === 'final-inspect' && config.showGcodePath) {
+            drawCNCPath(centerOffset, 0x00ffaa, 0x00ffaa);
           }
 
-          // --- CNC TOOLPATH PREVIEW (FINAL INSPECT) ---
-          if (config.showGcodePath && wizardStep === 'final-inspect') {
-            drawCNCPath(centerOffset);
-          }
-
-          // --- 4 RINGS SYSTEM (BODY SLICES) ---
+          // --- 4 RINGS SYSTEM (BODY SLICES IN STAGE 6) ---
           if (wizardStep === 'technical-review' && config.showBodySlices) {
-              const addRing = (z_local: number, color: number, name: string) => {
-                 createVisualRing(z_local, color, 3, name);
-              }
+            const addRing = (z_local: number, color: number, name: string) => {
+              createVisualRing(z_local, color, 3, name);
+            };
 
-              const endAZ = localPanBoundZ !== null ? localPanBoundZ : -tl / 2;
-              const endBZ = localHandleBoundZ !== null ? localHandleBoundZ : tl / 2;
+            const partMinZ = mainGeomBounds ? mainGeomBounds.min.z : -tl / 2;
+            const partMaxZ = mainGeomBounds ? mainGeomBounds.max.z : tl / 2;
+            const panSliceZ = localPanBoundZ !== null ? localPanBoundZ : (-tl / 2 + headLength);
+            const handleSliceZ = localHandleBoundZ !== null ? localHandleBoundZ : (tl / 2 - tailLength);
 
-              addRing(endAZ, 0x39ff14, 'zerogap_visual_ring_end_a');
-              addRing(endBZ, 0x39ff14, 'zerogap_visual_ring_end_b');
-
-              if (localPanBoundZ !== null) addRing(localPanBoundZ, 0x39ff14, 'zerogap_visual_ring_pan');
-              if (localHandleBoundZ !== null) addRing(localHandleBoundZ, 0x39ff14, 'zerogap_visual_ring_handle');
+            addRing(partMinZ, 0x00e5ff, 'zerogap_visual_ring_end_a');
+            addRing(panSliceZ, 0x3b82f6, 'zerogap_visual_ring_pan');
+            addRing(handleSliceZ, 0xfbbf24, 'zerogap_visual_ring_handle');
+            addRing(partMaxZ, 0x10b981, 'zerogap_visual_ring_end_b');
           }
+
+          // تظليل مناطق التداخل والفجوات باللون الأحمر في المرحلتين 6 و 7
+          renderCollisionAndGapHighlights(centerOffset, false);
 
           setIsLoading(false);
           return true;
@@ -1607,12 +1811,17 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
     config.pan,
     config.assembly,
     config.handle,
+    config.addFillet,
     config.thermalClearance,
+    config.markOrientation,
     config.showBorders,
     config.showGhostPart,
     config.showToolpathPreview,
     config.showGcodePath,
     config.showBodySlices,
+    config.fallbackCutToDepth,
+    config.showCollisionAnalysis,
+    localCollisionOverlay,
     config.renderMode,
     gridVisible,
     webglError,
@@ -1731,23 +1940,99 @@ const ThreeCanvas = forwardRef<ThreeCanvasRef, ThreeCanvasProps>(({ config, grid
       {/* Floating UI Container for Viewer Tools */}
       <div className="pointer-events-none absolute inset-0 text-white select-none z-10" />
 
-      {/* Ruler Action Button (top-right side) */}
-      {!webglError && wizardStep === 'final-inspect' && (
-        <div className="absolute top-6 right-6 flex flex-col items-end gap-2 z-10" onPointerDown={e => e.stopPropagation()}>
-          <button
-            onClick={() => {
-              setIsMeasuring(!isMeasuring);
-            }}
-            className={`flex items-center gap-2 px-4 py-2.5 rounded-xl border font-bold text-xs transition-all shadow-xl backdrop-blur-md cursor-pointer ${
-              isMeasuring
-                ? 'bg-gradient-to-r from-red-600 to-red-500 text-white border-red-500 hover:brightness-110 shadow-[0_0_15px_rgba(239,68,68,0.35)]'
-                : 'bg-zinc-950/80 hover:bg-zinc-900 border-white/10 text-white shadow-black/50 hover:border-white/20'
-            }`}
-            title="أداة للقياس (مسافة/زاوية/قوس)"
-          >
-            <Ruler size={14} className={isMeasuring ? 'animate-pulse' : ''} />
-            <span>{isMeasuring ? 'إغلاق أداة القياس' : 'أداة القياس'}</span>
-          </button>
+      {/* Top-Right Action Buttons (Collision Detection & Measurement Tool) */}
+      {!webglError && isAssemblyOrInspectionStep && (
+        <div className="absolute top-6 right-6 flex flex-col items-end gap-2 z-20" onPointerDown={e => e.stopPropagation()}>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setLocalCollisionOverlay(prev => !prev)}
+              className={`flex items-center gap-2 px-4 py-2.5 rounded-xl border font-bold text-xs transition-all shadow-xl backdrop-blur-md cursor-pointer ${
+                isCollisionOverlayActive
+                  ? 'bg-gradient-to-r from-red-600 to-rose-500 text-white border-red-400 shadow-[0_0_18px_rgba(239,68,68,0.45)]'
+                  : liveCollisionReport?.hasGaps
+                  ? 'bg-red-950/85 hover:bg-red-900/90 border-red-500/50 text-red-200 shadow-black/50'
+                  : 'bg-zinc-950/80 hover:bg-zinc-900 border-white/10 text-white shadow-black/50 hover:border-white/20'
+              }`}
+              title="تحليل مناطق التداخل وتظليل الفجوات باللون الأحمر في المشهد ثلاثي الأبعاد"
+            >
+              <ShieldAlert size={14} className={isCollisionOverlayActive || liveCollisionReport?.hasGaps ? 'animate-pulse text-red-200' : 'text-red-400'} />
+              <span>{isCollisionOverlayActive ? 'إخفاء تحليل التداخل' : 'تحليل التداخل والفجوات'}</span>
+              {liveCollisionReport && (
+                <span
+                  className={`px-1.5 py-0.5 rounded text-[10px] font-mono ${
+                    liveCollisionReport.hasGaps
+                      ? 'bg-red-500/30 text-white border border-red-300/40'
+                      : 'bg-emerald-500/25 text-emerald-300 border border-emerald-400/30'
+                  }`}
+                >
+                  {liveCollisionReport.hasGaps
+                    ? `فجوة ${Math.max(liveCollisionReport.panJoint.maxGapMm, liveCollisionReport.handleJoint.maxGapMm).toFixed(1)} مم`
+                    : 'Zero-Gap'}
+                </span>
+              )}
+            </button>
+
+            {wizardStep === 'final-inspect' && (
+              <button
+                onClick={() => {
+                  setIsMeasuring(!isMeasuring);
+                }}
+                className={`flex items-center gap-2 px-4 py-2.5 rounded-xl border font-bold text-xs transition-all shadow-xl backdrop-blur-md cursor-pointer ${
+                  isMeasuring
+                    ? 'bg-gradient-to-r from-red-600 to-red-500 text-white border-red-500 hover:brightness-110 shadow-[0_0_15px_rgba(239,68,68,0.35)]'
+                    : 'bg-zinc-950/80 hover:bg-zinc-900 border-white/10 text-white shadow-black/50 hover:border-white/20'
+                }`}
+                title="أداة للقياس (مسافة/زاوية/قوس)"
+              >
+                <Ruler size={14} className={isMeasuring ? 'animate-pulse' : ''} />
+                <span>{isMeasuring ? 'إغلاق أداة القياس' : 'أداة القياس'}</span>
+              </button>
+            )}
+          </div>
+
+          {/* بطاقة التشخيص الفوري العائمة عند تفعيل تحليل التداخل */}
+          {isCollisionOverlayActive && liveCollisionReport && (
+            <div
+              className="w-[290px] bg-zinc-950/92 border border-red-500/35 rounded-xl p-3 shadow-2xl backdrop-blur-md text-right font-sans animate-fade-in"
+              dir="rtl"
+            >
+              <div className="flex items-center justify-between border-b border-white/10 pb-2 mb-2">
+                <span className="text-[11px] font-bold text-red-400 flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-red-500 animate-ping" />
+                  خريطة التداخل والفجوات (3D Red Map)
+                </span>
+                <span className="text-[10px] font-mono font-bold text-white bg-red-500/20 px-1.5 py-0.5 rounded border border-red-500/30">
+                  {liveCollisionReport.manufacturingReadinessScore}%
+                </span>
+              </div>
+
+              <div className="space-y-1.5 text-[10px] font-mono mb-2">
+                <div className="flex justify-between text-zinc-300">
+                  <span className="font-sans text-zinc-400">تلامس المقلاة (طرف B):</span>
+                  <span className={liveCollisionReport.panJoint.maxGapMm > 0.08 ? 'text-red-400 font-bold' : 'text-emerald-400 font-bold'}>
+                    {liveCollisionReport.panJoint.contactCoveragePercent.toFixed(0)}% (فجوة {liveCollisionReport.panJoint.maxGapMm.toFixed(2)} مم)
+                  </span>
+                </div>
+                <div className="flex justify-between text-zinc-300">
+                  <span className="font-sans text-zinc-400">تلامس المقبض (طرف A):</span>
+                  <span className={liveCollisionReport.handleJoint.maxGapMm > 0.08 ? 'text-red-400 font-bold' : 'text-emerald-400 font-bold'}>
+                    {liveCollisionReport.handleJoint.contactCoveragePercent.toFixed(0)}% (فجوة {liveCollisionReport.handleJoint.maxGapMm.toFixed(2)} مم)
+                  </span>
+                </div>
+              </div>
+
+              <div className="pt-2 border-t border-white/10 space-y-1 text-[9.5px] text-zinc-300">
+                <div className="flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 rounded-sm bg-[#ff0033] border border-red-300 shrink-0" />
+                  <span>شريط ونقاط حمراء متوهجة: فجوة عدم تلامس (Gap)</span>
+                </div>
+                <div className="flex items-center gap-1.5">
+                  <span className="w-2.5 h-2.5 rounded-sm bg-[#ff1744]/60 border border-[#ff5252] shrink-0" />
+                  <span>مجسم أحمر شفاف: منطقة تداخل المعدن (Collision)</span>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

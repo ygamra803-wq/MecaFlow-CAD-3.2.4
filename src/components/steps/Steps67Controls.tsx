@@ -6,6 +6,7 @@ import { generateGcode } from '../../lib/gcodeGenerator';
 import { generateProfessionalFileName } from '../../lib/fileNameGenerator';
 import { StepExportService } from '../../lib/stepExport';
 import { NotificationService } from '../../lib/notificationService';
+import { CollisionAnalysisCard } from '../analysis/CollisionAnalysisCard';
 
 interface Steps67ControlsProps {
   config: ZeroGapState;
@@ -210,6 +211,13 @@ export const Steps67Controls: React.FC<Steps67ControlsProps> = ({
             />
           </section>
 
+          <CollisionAnalysisCard
+            config={config}
+            wizardStep={wizardStep}
+            onUpdate={onUpdate}
+            readOnly={isPreviousWorkMode}
+          />
+
           {/* لوحة المراجعة الهندسية المتكاملة والتحليل الهيكلي */}
           <div className="mt-4 p-3 rounded-lg bg-zinc-900/60 border border-zinc-500/10 text-right text-[10.5px] leading-relaxed text-zinc-300 animate-fade-in" id="meca-validation-step6">
             <div className="font-bold text-[#10B981] mb-1 flex items-center gap-1.5 justify-end">
@@ -311,6 +319,13 @@ export const Steps67Controls: React.FC<Steps67ControlsProps> = ({
             )}
           </section>
 
+          <CollisionAnalysisCard
+            config={config}
+            wizardStep={wizardStep}
+            onUpdate={onUpdate}
+            readOnly={isPreviousWorkMode}
+          />
+
           {/* لوحة الاستشارات التصنيعية النهائية لـ G-code والتصدير */}
           <div className="mb-6 p-3 rounded-lg bg-zinc-900/60 border border-zinc-500/10 text-right text-[10.5px] leading-relaxed text-zinc-300 animate-fade-in" id="meca-validation-step7">
             <div className="font-bold text-amber-500 mb-1 flex items-center gap-1.5 justify-end">
@@ -405,18 +420,14 @@ export const Steps67Controls: React.FC<Steps67ControlsProps> = ({
                 onClick={async () => {
                   try {
                     setIsExporting(true);
-                    const service = new StepExportService();
-                    const stepString = await service.exportToSTEP(config);
-                    
-                    const blob = new Blob([stepString], { type: 'application/step' });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = generateProfessionalFileName(config, 'step');
-                    a.click();
-                    URL.revokeObjectURL(url);
-                    
-                    service.terminate();
+                    if (onExportSTEP) {
+                      await onExportSTEP('step');
+                    } else {
+                      const service = new StepExportService();
+                      const stepString = await service.exportToSTEP(config);
+                      exportManufacturingFile(stepString, 'step', generateProfessionalFileName(config, 'step'));
+                      service.terminate();
+                    }
                   } catch (err: any) {
                     console.error('Export failed:', err);
                     NotificationService.error('فشل تصدير STEP: ' + (err.message || String(err)));
@@ -425,8 +436,8 @@ export const Steps67Controls: React.FC<Steps67ControlsProps> = ({
                   }
                 }}
                 disabled={isExporting}
-                className={`w-full py-2 transition-colors text-white font-bold text-[11px] uppercase rounded border ${isExporting ? 'bg-purple-800 border-purple-800 opacity-50 cursor-not-allowed' : 'bg-purple-600 hover:bg-purple-500 border-purple-500 shadow-[0_0_15px_rgba(147,51,234,0.3)]'}`}
-                title="تحميل مجسم STEP صناعي للتعديل والتصنيع (محرك OpenCASCADE محلي)"
+                className={`w-full py-2 transition-colors text-white font-bold text-[11px] uppercase rounded border cursor-pointer ${isExporting ? 'bg-purple-800 border-purple-800 opacity-50 cursor-not-allowed' : 'bg-purple-600 hover:bg-purple-500 border-purple-500 shadow-[0_0_15px_rgba(147,51,234,0.3)]'}`}
+                title="تحميل مجسم STEP صناعي (ISO-10303-21 AP214) مطابق تماماً للمجسم ثلاثي الأبعاد"
               >
                 {isExporting ? 'جاري تصدير STEP...' : '📄 تصدير STEP (مباشر)'}
               </button>

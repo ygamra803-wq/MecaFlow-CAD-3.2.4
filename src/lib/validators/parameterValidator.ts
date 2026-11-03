@@ -8,7 +8,7 @@ export interface ValidationResult {
 }
 
 /**
- * التحقق الشامل من صحة جميع معاملات التصميم
+ * التحقق الشامل من صحة جميع معاملات التصميم عبر المراحل السبع
  */
 export class ParameterValidator {
   private static readonly TUBE_MIN_WIDTH = 5;
@@ -16,21 +16,23 @@ export class ParameterValidator {
   private static readonly TUBE_MIN_THICKNESS = 0.5;
   private static readonly PAN_MIN_DIAMETER = 50;
   private static readonly PAN_MIN_HEIGHT = 10;
-  private static readonly ANGLE_MIN = 5;
-  private static readonly ANGLE_MAX = 175;
+  private static readonly MAX_SAFE_TILT_ANGLE = 65;
+  private static readonly LIMIT_TILT_ANGLE = 85;
 
   /**
    * التحقق من المعاملات الخاصة بالمرحلة الحالية فقط
    */
-  static validateStepParameters(state: CADState, step: WizardStep): ValidationResult {
+  static validateStepParameters(state: CADState | ZeroGapState, step: WizardStep): ValidationResult {
+    const normalizedState: CADState = 'zeroGap' in state ? state : ({ zeroGap: state } as CADState);
+    const zg = normalizedState.zeroGap;
     const errors: string[] = [];
     const warnings: string[] = [];
 
-    const tubeValidation = this.validateTube(state.zeroGap.tube);
-    const panValidation = this.validatePan(state.zeroGap.pan);
-    const handleValidation = this.validateHandle(state.zeroGap.handle);
-    const angleValidation = this.validateAngles(state);
-    const compatibilityValidation = this.validateCompatibility(state);
+    const tubeValidation = this.validateTube(zg.tube);
+    const panValidation = this.validatePan(zg.pan);
+    const handleValidation = this.validateHandle(zg.handle);
+    const angleValidation = this.validateAngles(normalizedState);
+    const compatibilityValidation = this.validateCompatibility(normalizedState, step);
 
     if (step === 'tube-design') {
       errors.push(...tubeValidation.errors);
@@ -41,12 +43,11 @@ export class ParameterValidator {
     } else if (step === 'pan-tube-cut') {
       errors.push(...tubeValidation.errors, ...panValidation.errors, ...angleValidation.errors);
       warnings.push(...tubeValidation.warnings, ...panValidation.warnings, ...angleValidation.warnings);
-      // التحقق من توافق الأنبوب والمقلاة
-      if (state.zeroGap.tube.width > state.zeroGap.pan.topDiameter || state.zeroGap.tube.height > state.zeroGap.pan.topDiameter) {
-        warnings.push(`⚠️ أبعاد الأنبوب قد تكون أكبر من قطر المقلاة`);
+      if (zg.tube.width > zg.pan.topDiameter || zg.tube.height > zg.pan.topDiameter) {
+        warnings.push(`⚠️ أبعاد الأنبوب قد تكون أكبر من قطر المقلاة العلوي`);
       }
-      if (state.zeroGap.assembly.insertionDistance > state.zeroGap.tube.totalLength) {
-        errors.push(`❌ مسافة الإدراج أكبر من طول الأنبوب`);
+      if (zg.assembly.insertionDistance >= zg.tube.totalLength) {
+        errors.push(`❌ مسافة اختراق المقلاة (${zg.assembly.insertionDistance} ملم) تتجاوز الطول الكلي للأنبوب (${zg.tube.totalLength} ملم)`);
       }
     } else if (step === 'handle-design') {
       errors.push(...handleValidation.errors);
@@ -54,12 +55,31 @@ export class ParameterValidator {
     } else if (step === 'tube-handle-cut') {
       errors.push(...handleValidation.errors, ...tubeValidation.errors);
       warnings.push(...handleValidation.warnings, ...tubeValidation.warnings);
-      if (state.zeroGap.handle.insertionDepth > state.zeroGap.tube.totalLength) {
-        warnings.push(`⚠️ عمق إدراج المقبض قد يكون أكبر من طول الأنبوب`);
+      if (zg.handle.insertionDepth >= zg.tube.totalLength) {
+        errors.push(`❌ عمق غرز المقبض (${zg.handle.insertionDepth} ملم) يتجاوز طول الأنبوب (${zg.tube.totalLength} ملم)`);
+      } else if (
+        zg.assembly.insertionDistance + zg.handle.insertionDepth >=
+        zg.tube.totalLength
+      ) {
+        warnings.push(
+          `⚠️ مجموع اختراق المقلاة (${zg.assembly.insertionDistance} ملم) وغرز المقبض (${zg.handle.insertionDepth} ملم) يتداخل داخل طول الأنبوب الخام (${zg.tube.totalLength} ملم)`
+        );
       }
     } else if (step === 'technical-review' || step === 'final-inspect') {
-      errors.push(...tubeValidation.errors, ...panValidation.errors, ...handleValidation.errors, ...angleValidation.errors, ...compatibilityValidation.errors);
-      warnings.push(...tubeValidation.warnings, ...panValidation.warnings, ...handleValidation.warnings, ...angleValidation.warnings, ...compatibilityValidation.warnings);
+      errors.push(
+        ...tubeValidation.errors,
+        ...panValidation.errors,
+        ...handleValidation.errors,
+        ...angleValidation.errors,
+        ...compatibilityValidation.errors
+      );
+      warnings.push(
+        ...tubeValidation.warnings,
+        ...panValidation.warnings,
+        ...handleValidation.warnings,
+        ...angleValidation.warnings,
+        ...compatibilityValidation.warnings
+      );
     }
 
     return {
@@ -73,45 +93,12 @@ export class ParameterValidator {
   /**
    * التحقق من جميع المعاملات
    */
-  static validateAllParameters(state: CADState): ValidationResult {
-    const errors: string[] = [];
-    const warnings: string[] = [];
-
-    // التحقق من الأنبوب
-    const tubeValidation = this.validateTube(state.zeroGap.tube);
-    errors.push(...tubeValidation.errors);
-    warnings.push(...tubeValidation.warnings);
-
-    // التحقق من المقلاة
-    const panValidation = this.validatePan(state.zeroGap.pan);
-    errors.push(...panValidation.errors);
-    warnings.push(...panValidation.warnings);
-
-    // التحقق من المقبض
-    const handleValidation = this.validateHandle(state.zeroGap.handle);
-    errors.push(...handleValidation.errors);
-    warnings.push(...handleValidation.warnings);
-
-    // التحقق من الزوايا والتحويلات
-    const angleValidation = this.validateAngles(state);
-    errors.push(...angleValidation.errors);
-    warnings.push(...angleValidation.warnings);
-
-    // التحقق من التوافقية بين الأجزاء
-    const compatibilityValidation = this.validateCompatibility(state);
-    errors.push(...compatibilityValidation.errors);
-    warnings.push(...compatibilityValidation.warnings);
-
-    return {
-      isValid: errors.length === 0,
-      errors,
-      warnings,
-      severity: errors.length > 0 ? 'error' : warnings.length > 0 ? 'warning' : 'info'
-    };
+  static validateAllParameters(state: CADState | ZeroGapState): ValidationResult {
+    return this.validateStepParameters(state, 'final-inspect');
   }
 
   /**
-   * التحقق من معاملات الأنبوب
+   * التحقق من معاملات الأنبوب مع مراعاة الشكل الفعلي (دائري / بيضاوي / مستطيل)
    */
   private static validateTube(tube: TubeConfig): {
     errors: string[];
@@ -120,48 +107,46 @@ export class ParameterValidator {
     const errors: string[] = [];
     const warnings: string[] = [];
 
-    // التحقق من الأبعاد الأساسية
+    const effectiveHeight = tube.shape === 'دائري' ? tube.width : tube.height;
+
     if (tube.width < this.TUBE_MIN_WIDTH) {
       errors.push(
-        `❌ عرض الأنبوب (${tube.width}ملم) أقل من الحد الأدنى (${this.TUBE_MIN_WIDTH}ملم)`
+        `❌ عرض/قطر الأنبوب (${tube.width} ملم) أقل من الحد الأدنى (${this.TUBE_MIN_WIDTH} ملم)`
       );
     }
 
-    if (tube.height < this.TUBE_MIN_HEIGHT) {
+    if (effectiveHeight < this.TUBE_MIN_HEIGHT) {
       errors.push(
-        `❌ ارتفاع الأنبوب (${tube.height}ملم) أقل من الحد الأدنى (${this.TUBE_MIN_HEIGHT}ملم)`
+        `❌ ارتفاع الأنبوب (${effectiveHeight} ملم) أقل من الحد الأدنى (${this.TUBE_MIN_HEIGHT} ملم)`
       );
     }
 
-    // التحقق من السمك
-    const minDim = Math.min(tube.width, tube.height);
-    if (tube.thickness > minDim / 2) {
+    const minDim = Math.min(tube.width, effectiveHeight);
+    if (tube.thickness >= minDim / 2) {
       errors.push(
-        `❌ سمك الأنبوب (${tube.thickness}ملم) أكبر من نصف أصغر بعد (${(minDim / 2).toFixed(2)}ملم) - هندسة غير صحيحة`
+        `❌ سماكة الأنبوب (${tube.thickness} ملم) أكبر من أو تساوي نصف أصغر بُعد (${(minDim / 2).toFixed(2)} ملم) مما يسد التجويف الداخلي`
       );
     }
 
     if (tube.thickness < this.TUBE_MIN_THICKNESS) {
       warnings.push(
-        `⚠️ سمك الأنبوب (${tube.thickness}ملم) صغير جداً - قد تحدث مشاكل في القطع`
+        `⚠️ سماكة الأنبوب (${tube.thickness} ملم) رقيقة جداً وقد تسبب تشوهاً حرارياً أثناء القطع بالليزر`
       );
     }
 
-    // التحقق من نصف قطر الزوايا
-    if (tube.cornerRadius > minDim / 2) {
-      errors.push(
-        `❌ نصف قطر الزوايا (${tube.cornerRadius}ملم) كبير جداً - قد يسبب هندسة غير صحيحة`
-      );
+    if (tube.shape === 'مستطيل') {
+      if (tube.cornerRadius > minDim / 2) {
+        errors.push(
+          `❌ نصف قطر الزوايا (${tube.cornerRadius} ملم) يتجاوز نصف أصغر بُعد للأنبوب (${(minDim / 2).toFixed(2)} ملم)`
+        );
+      }
+      if (tube.cornerRadius < 0) {
+        errors.push(`❌ نصف قطر الزوايا لا يمكن أن يكون سالباً`);
+      }
     }
 
-    if (tube.cornerRadius < 0) {
-      errors.push(`❌ نصف قطر الزوايا لا يمكن أن يكون سالباً`);
-    }
-
-    // التحقق من الطول
-    const totalLength = tube.totalLength;
-    if (totalLength < 20) {
-      warnings.push(`⚠️ طول الأنبوب (${totalLength}ملم) قصير جداً`);
+    if (tube.totalLength < 20) {
+      warnings.push(`⚠️ طول الأنبوب (${tube.totalLength} ملم) قصير جداً`);
     }
 
     return { errors, warnings };
@@ -179,34 +164,34 @@ export class ParameterValidator {
 
     if (pan.bottomDiameter < this.PAN_MIN_DIAMETER) {
       warnings.push(
-        `⚠️ قطر قاع المقلاة (${pan.bottomDiameter}ملم) صغير جداً - قد تحدث مشاكل في الدقة`
+        `⚠️ قطر قاع المقلاة (${pan.bottomDiameter} ملم) صغير نسبياً`
       );
     }
 
     if (pan.topDiameter < pan.bottomDiameter) {
       errors.push(
-        `❌ قطر أعلى المقلاة (${pan.topDiameter}ملم) أصغر من قطر القاع (${pan.bottomDiameter}ملم) - هندسة غير صحيحة`
+        `❌ القطر العلوي للمقلاة (${pan.topDiameter} ملم) أصغر من قطر القاع (${pan.bottomDiameter} ملم)`
       );
     }
 
     if (pan.height < this.PAN_MIN_HEIGHT) {
       warnings.push(
-        `⚠️ ارتفاع المقلاة (${pan.height}ملم) صغير جداً - قد تحدث مشاكل في التقاطع`
+        `⚠️ ارتفاع المقلاة (${pan.height} ملم) صغير جداً وقد يحد من منطقة التقاطع`
       );
     }
 
     if (pan.wallThickness > 5) {
       warnings.push(
-        `⚠️ سمك جدار المقلاة (${pan.wallThickness}ملم) كبير جداً - قد يؤثر على دقة القطع`
+        `⚠️ سماكة جدار المقلاة (${pan.wallThickness} ملم) كبيرة وقد تؤثر على خلوص اللحام`
       );
     }
 
     if (pan.wallThickness < 0.5) {
-      errors.push(`❌ سمك جدار المقلاة (${pan.wallThickness}ملم) صغير جداً جداً`);
+      errors.push(`❌ سماكة جدار المقلاة (${pan.wallThickness} ملم) أقل من الحد الأدنى المسموح (0.5 ملم)`);
     }
 
     if (pan.curveRadius < 0) {
-      errors.push(`❌ نصف قطر الانحناء لا يمكن أن يكون سالباً`);
+      errors.push(`❌ نصف قطر تقوس الجدار لا يمكن أن يكون سالباً`);
     }
 
     return { errors, warnings };
@@ -222,21 +207,23 @@ export class ParameterValidator {
     const errors: string[] = [];
     const warnings: string[] = [];
 
+    const effectiveHeight = handle.shape === 'cylindrical' ? handle.width : handle.height;
+
     if (handle.width < 5) {
-      errors.push(`❌ عرض المقبض (${handle.width}ملم) صغير جداً`);
+      errors.push(`❌ عرض/قطر المقبض (${handle.width} ملم) صغير جداً`);
     }
 
-    if (handle.height < 5) {
-      errors.push(`❌ ارتفاع المقبض (${handle.height}ملم) صغير جداً`);
+    if (effectiveHeight < 5) {
+      errors.push(`❌ ارتفاع المقبض (${effectiveHeight} ملم) صغير جداً`);
     }
 
     if (handle.depth < 10) {
-      warnings.push(`⚠️ عمق المقبض (${handle.depth}ملم) قصير جداً`);
+      warnings.push(`⚠️ طول المقبض (${handle.depth} ملم) قصير جداً`);
     }
 
     if (handle.insertionDepth > handle.depth) {
       errors.push(
-        `❌ عمق الإدراج (${handle.insertionDepth}ملم) أكبر من عمق المقبض (${handle.depth}ملم)`
+        `❌ عمق غرز المقبض (${handle.insertionDepth} ملم) أكبر من الطول الكلي للمقبض (${handle.depth} ملم)`
       );
     }
 
@@ -244,7 +231,7 @@ export class ParameterValidator {
   }
 
   /**
-   * التحقق من الزوايا
+   * التحقق من الزوايا (نطاق زاوية ميلان الأنبوب الفعلي هو -90° إلى +90° حيث 0° تعني الاتصال الأفقي العمودي)
    */
   private static validateAngles(state: CADState): {
     errors: string[];
@@ -254,25 +241,21 @@ export class ParameterValidator {
     const warnings: string[] = [];
 
     const tiltAngle = state.zeroGap.assembly.tiltAngle;
-    const handleAngle = state.zeroGap.assembly.handleAngleY;
+    const handleRollAngle = state.zeroGap.assembly.handleAngleY;
 
-    // التحقق من زاوية الميل
-    if (tiltAngle < this.ANGLE_MIN || tiltAngle > this.ANGLE_MAX) {
-      warnings.push(
-        `⚠️ زاوية الميل (${tiltAngle}°) خارج النطاق المعتاد (${this.ANGLE_MIN}° - ${this.ANGLE_MAX}°) - قد تحدث مشاكل في التقاطع`
-      );
-    }
-
-    if (tiltAngle < 1 || tiltAngle > 179) {
+    if (Math.abs(tiltAngle) > this.LIMIT_TILT_ANGLE) {
       errors.push(
-        `❌ زاوية الميل (${tiltAngle}°) قريبة جداً من الحد - التقاطع غير ممكن`
+        `❌ زاوية الميل (${tiltAngle}°) حادة جداً وتتجاوز الحد الهندسي (±${this.LIMIT_TILT_ANGLE}°) مما يمنع تقاطع الأنبوب مع جدار المقلاة`
+      );
+    } else if (Math.abs(tiltAngle) > this.MAX_SAFE_TILT_ANGLE) {
+      warnings.push(
+        `⚠️ زاوية الميل (${tiltAngle}°) كبيرة وتتجاوز النطاق القياسي (±${this.MAX_SAFE_TILT_ANGLE}°) — يُوصى بمراجعة حواف الشطف`
       );
     }
 
-    // التحقق من زاوية المقبض
-    if (Math.abs(handleAngle) > 60) {
+    if (Math.abs(handleRollAngle) > 60) {
       warnings.push(
-        `⚠️ زاوية المقبض (${handleAngle}°) كبيرة جداً - قد تسبب مشاكل في التقاطع`
+        `⚠️ زاوية دوران الأنبوب (${handleRollAngle}°) كبيرة وقد تزيد من تعقيد مسار الليزر`
       );
     }
 
@@ -280,9 +263,12 @@ export class ParameterValidator {
   }
 
   /**
-   * التحقق من التوافقية بين الأجزاء
+   * التحقق من التوافقية بين الأجزاء حسب المرحلة
    */
-  private static validateCompatibility(state: CADState): {
+  private static validateCompatibility(
+    state: CADState,
+    step: WizardStep = 'final-inspect'
+  ): {
     errors: string[];
     warnings: string[];
   } {
@@ -290,26 +276,33 @@ export class ParameterValidator {
     const warnings: string[] = [];
 
     const { tube, pan, handle, assembly } = state.zeroGap;
+    const effectiveTubeHeight = tube.shape === 'دائري' ? tube.width : tube.height;
 
-    // التحقق من أن الأنبوب يمكن أن يتقاطع مع المقلاة
-    if (tube.width > pan.topDiameter || tube.height > pan.topDiameter) {
+    const isStep67 = step === 'technical-review' || step === 'final-inspect';
+    const headLen = Math.max(assembly.insertionDistance || 10, 10);
+    const tailLen = Math.max(handle.insertionDepth || 10, 10);
+    const effectiveLength = isStep67 ? (tube.partLength + headLen + tailLen) : tube.totalLength;
+
+    if (tube.width > pan.topDiameter || effectiveTubeHeight > pan.topDiameter) {
       warnings.push(
-        `⚠️ أبعاد الأنبوب (${tube.width}×${tube.height}ملم) قد تكون أكبر من قطر المقلاة (${pan.topDiameter}ملم)`
+        `⚠️ أبعاد الأنبوب (${tube.width}×${effectiveTubeHeight} ملم) أكبر من القطر العلوي للمقلاة (${pan.topDiameter} ملم)`
       );
     }
 
-    // التحقق من مسافة الإدراج
-    if (assembly.insertionDistance > tube.totalLength) {
+    if (assembly.insertionDistance >= effectiveLength) {
       errors.push(
-        `❌ مسافة الإدراج (${assembly.insertionDistance}ملم) أكبر من طول الأنبوب (${tube.totalLength}ملم)`
+        `❌ مسافة الإدراج (${assembly.insertionDistance} ملم) أكبر من الطول الفعلي للأنبوب (${effectiveLength} ملم)`
       );
     }
 
-    // التحقق من أن المقبض يمكن أن يتقاطع مع الأنبوب
-    if (handle.insertionDepth > tube.totalLength) {
+    if (handle.insertionDepth >= effectiveLength) {
       warnings.push(
-        `⚠️ عمق إدراج المقبض (${handle.insertionDepth}ملم) قد يكون أكبر من طول الأنبوب (${tube.totalLength}ملم)`
+        `⚠️ عمق غرز المقبض (${handle.insertionDepth} ملم) يتجاوز الطول الفعلي للأنبوب (${effectiveLength} ملم)`
       );
+    }
+
+    if (tube.partLength < 10 && isStep67) {
+      errors.push(`❌ طول البدن الصافي للقطعة (${tube.partLength} ملم) أقل من الحد الأدنى التصنيعي (10 ملم)`);
     }
 
     return { errors, warnings };
@@ -323,6 +316,9 @@ export class ParameterValidator {
     value: number,
     state: CADState
   ): { isValid: boolean; message: string } {
+    const effectiveHeight =
+      state.zeroGap.tube.shape === 'دائري' ? state.zeroGap.tube.width : state.zeroGap.tube.height;
+
     switch (paramName) {
       case 'tubeWidth':
         if (value < this.TUBE_MIN_WIDTH) {
@@ -334,28 +330,29 @@ export class ParameterValidator {
           return { isValid: false, message: `ارتفاع الأنبوب يجب أن يكون على الأقل ${this.TUBE_MIN_HEIGHT} ملم` };
         }
         return { isValid: true, message: '' };
-      case 'tubeThickness':
+      case 'tubeThickness': {
         if (value < this.TUBE_MIN_THICKNESS) {
           return { isValid: false, message: `سمك الأنبوب لا يمكن أن يقل عن ${this.TUBE_MIN_THICKNESS} ملم` };
         }
-        const minDim = Math.min(state.zeroGap.tube.width, state.zeroGap.tube.height);
-        if (value > minDim / 2) {
+        const minDim = Math.min(state.zeroGap.tube.width, effectiveHeight);
+        if (value >= minDim / 2) {
           return { isValid: false, message: `سمك الأنبوب كبير كفاية ليسد التجويف بالكامل` };
         }
         return { isValid: true, message: '' };
+      }
       case 'panBottomDiameter':
         if (value < this.PAN_MIN_DIAMETER) {
           return { isValid: false, message: `قطر قاع المقلاة يجب أن يكون على الأقل ${this.PAN_MIN_DIAMETER} ملم` };
         }
         return { isValid: true, message: '' };
       case 'panTopDiameter':
-        if (value <= state.zeroGap.pan.bottomDiameter) {
-          return { isValid: false, message: `قطر قاع المقلاة يجب أن يكون أصغر من قطر أعلى المقلاة` };
+        if (value < state.zeroGap.pan.bottomDiameter) {
+          return { isValid: false, message: `قطر قاع المقلاة يجب أن يكون أصغر من أو يساوي قطر أعلى المقلاة` };
         }
         return { isValid: true, message: '' };
       case 'tiltAngle':
-        if (value < 1 || value > 179) {
-          return { isValid: false, message: `زاوية ميلان الأنبوب يجب أن تكون بين 1 و 179 درجة` };
+        if (Math.abs(value) > this.LIMIT_TILT_ANGLE) {
+          return { isValid: false, message: `زاوية ميلان الأنبوب يجب أن تكون بين -${this.LIMIT_TILT_ANGLE}° و +${this.LIMIT_TILT_ANGLE}°` };
         }
         return { isValid: true, message: '' };
       default:

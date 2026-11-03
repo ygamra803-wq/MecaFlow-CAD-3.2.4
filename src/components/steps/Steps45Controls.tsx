@@ -2,6 +2,7 @@ import React from 'react';
 import { ZeroGapState, WizardStep } from '../../types';
 import { PrecisionControl, CustomToggle } from './SharedControls';
 import { PanIcon, HandleIcon } from '../DashboardView';
+import { CollisionAnalysisCard } from '../analysis/CollisionAnalysisCard';
 
 interface Steps45ControlsProps {
   config: ZeroGapState;
@@ -142,6 +143,12 @@ export const Steps45Controls: React.FC<Steps45ControlsProps> = ({
               color="var(--accent)"
             />
           </section>
+
+          <CollisionAnalysisCard
+            config={config}
+            wizardStep={wizardStep}
+            onUpdate={onUpdate}
+          />
 
           {/* لوحة الاستشارة الهندسية المتقدمة لتقاطع المقلاة */}
           <div className="mt-4 p-3 rounded-lg bg-zinc-900/60 border border-zinc-500/10 text-right text-[10.5px] leading-relaxed text-zinc-300" id="meca-validation-step4">
@@ -292,6 +299,12 @@ export const Steps45Controls: React.FC<Steps45ControlsProps> = ({
               color="var(--accent-blue)"
             />
           </section>
+
+          <CollisionAnalysisCard
+            config={config}
+            wizardStep={wizardStep}
+            onUpdate={onUpdate}
+          />
 
           {/* دليل خيار القص التلقائي المسطح */}
           <div className="mt-3 p-3 rounded bg-zinc-950/40 border border-blue-500/10 text-right text-[10px] leading-relaxed text-zinc-400">
